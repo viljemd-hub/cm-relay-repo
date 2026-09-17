@@ -10,19 +10,15 @@
  * serves many installations). Meant to run periodically (cron), not as a
  * long-lived daemon - not built yet.
  *
- * KNOWN UNRESOLVED ISSUE (2026-09-17, verified against real staging sandbox,
- * not a bug in this code): pushing availability=0 (close) always sticks and
- * reads back correctly. Pushing availability=1 (re-open) never sticks - it
- * reads back as 0 every time, reproduced in isolation on a never-touched
- * date with a 20s wait, ruling out async task-queue race conditions. The
- * price path (this same request shape, different field) works reliably, so
- * this looks like a Channex platform quirk specific to the availability
- * field on `vacation_rental` / count_of_rooms:1 properties, not a mapping
- * or conversion bug here (Channex's own accept-response even echoes back
- * the correct value it was sent, before silently reverting it). Needs
- * either Channex support's input or the certification screenshare to
- * clarify before this path can be trusted - do not assume it's fixed
- * without re-testing against the sandbox first.
+ * RESOLVED 2026-09-17 (was reported as an open issue earlier the same day):
+ * availability=1 (re-open) never stuck when pushed via /restrictions keyed
+ * by rate_plan_id, while availability=0 (close) always worked - looked like
+ * a flaky platform bug. Channex support (Andrew) confirmed the real cause:
+ * availability is a SEPARATE endpoint (/api/v1/availability), keyed by
+ * room_type_id, not part of /restrictions at all. Fixed via
+ * ChannexAdapter::pushAvailability()/pushAvailabilityBatch() and
+ * relay_build_availability_entries() now returning two entry sets. Verified
+ * live: both 0 and 1 stick correctly, single and batched.
  *
  * Run: php bin/outbox_worker.php
  */
@@ -132,6 +128,9 @@ foreach ($installations as $installation) {
         $newest = end($commands);
         $allIds = array_column($commands, 'id');
 
+        // Two separate Channex calls now (availability endpoint + restrictions
+        // endpoint, see occupancy_to_ari.php), so the rate limit is checked/
+        // recorded twice - counts as 2 against the 20/min account-wide budget.
         if (!relay_rate_limit_ok('channex', 20)) {
             $skippedRateLimit += count($commands);
             continue;
@@ -147,23 +146,31 @@ foreach ($installations as $installation) {
         $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
         $minNights = (int)($payload['min_nights'] ?? 1);
 
-        $entries = relay_build_availability_entries(
+        $built = relay_build_availability_entries(
             $mapping['provider_property_id'],
+            $mapping['provider_room_type_id'],
             $mapping['provider_rate_plan_id'],
             $segments,
             $minNights
         );
 
         relay_rate_limit_record_call('channex');
-        $result = $adapter->pushBatch($entries);
+        $availResult = $adapter->pushAvailabilityBatch($built['availability']);
 
-        if ($result->ok) {
+        $restrResult = null;
+        if ($availResult->ok && relay_rate_limit_ok('channex', 20)) {
+            relay_rate_limit_record_call('channex');
+            $restrResult = $adapter->pushBatch($built['restrictions']);
+        }
+
+        if ($availResult->ok && $restrResult !== null && $restrResult->ok) {
             markSent($queue, $allIds);
             $pushed++;
-            echo "OK  installation={$installation['installation_uuid']} unit=$unit reason=availability window=" . count($entries) . " collapsed=" . count($allIds) . "\n";
+            echo "OK  installation={$installation['installation_uuid']} unit=$unit reason=availability window=" . count($built['availability']) . " collapsed=" . count($allIds) . "\n";
         } else {
-            markFailed($queue, $allIds, (string)$result->error);
-            echo "FAIL installation={$installation['installation_uuid']} unit=$unit reason=availability error={$result->error}\n";
+            $error = !$availResult->ok ? $availResult->error : ($restrResult->error ?? 'rate_limited_between_calls');
+            markFailed($queue, $allIds, (string)$error);
+            echo "FAIL installation={$installation['installation_uuid']} unit=$unit reason=availability error=$error\n";
         }
     }
 }

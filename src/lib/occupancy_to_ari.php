@@ -49,16 +49,25 @@ function relay_occupancy_segments_to_blocked_dates(array $segments): array
 }
 
 /**
- * Builds Channex /restrictions entries for a rolling window starting today.
+ * Builds entries for a rolling window starting today, split into the two
+ * shapes Channex actually needs (confirmed by Channex support - Andrew,
+ * 2026-09-17): availability lives on its own endpoint (/api/v1/availability),
+ * keyed by room_type_id, NOT on /restrictions and NOT keyed by rate_plan_id -
+ * pushing it the old way silently reverted every "re-open" (availability=1)
+ * write while "close" (=0) happened to work, which is what made this look
+ * like a flaky bug instead of a wrong endpoint.
+ *
  * 500 days matches Channex's own "full sync" window definition (PMS
  * Certification Tests §1) - this isn't a timer-driven full sync (that's
  * explicitly forbidden, §13), it's one event-driven push of the full
  * current picture, which is what their own full-sync spec describes.
  *
  * @param array<int, array<string, mixed>> $occupancySegments
+ * @return array{availability: array, restrictions: array}
  */
 function relay_build_availability_entries(
     string $propertyId,
+    string $roomTypeId,
     string $ratePlanId,
     array $occupancySegments,
     int $minNights,
@@ -66,21 +75,32 @@ function relay_build_availability_entries(
 ): array {
     $blocked = relay_occupancy_segments_to_blocked_dates($occupancySegments);
 
-    $entries = [];
+    $availabilityEntries = [];
+    $restrictionEntries = [];
     $cursor = new DateTimeImmutable('today');
     for ($i = 0; $i < $windowDays; $i++) {
         $date = $cursor->format('Y-m-d');
-        $entries[] = [
+
+        $availabilityEntries[] = [
+            'property_id' => $propertyId,
+            'room_type_id' => $roomTypeId,
+            'date' => $date,
+            'availability' => isset($blocked[$date]) ? 0 : 1,
+        ];
+
+        $restrictionEntries[] = [
             'property_id' => $propertyId,
             'rate_plan_id' => $ratePlanId,
             'date' => $date,
-            'availability' => isset($blocked[$date]) ? 0 : 1,
+            // plain 'min_stay' deliberately omitted - Channex warns
+            // "property doesn't support `min_stay`, use `min_stay_through`/
+            // `min_stay_arrival`" when it's sent alongside them.
             'min_stay_arrival' => $minNights,
             'min_stay_through' => $minNights,
-            'min_stay' => $minNights,
         ];
+
         $cursor = $cursor->modify('+1 day');
     }
 
-    return $entries;
+    return ['availability' => $availabilityEntries, 'restrictions' => $restrictionEntries];
 }
