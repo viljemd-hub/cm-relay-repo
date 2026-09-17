@@ -54,11 +54,37 @@ stikali: Connectivity, Community, Sharing/referrals, AI discovery.
   trenutne faze — glej Ecosystem addendum §32: barebone mora biti samo
   *ready for it*, ne dograjen produkt.
 
-## Jezik / framework / hosting
+## Jezik / framework / hosting (odločeno 2026-09-17)
 
-Namenoma **še ni odločeno**. Ker ta skelet ne vsebuje delujoče logike, izbira ne
-blokira ničesar. Odločitev pade v Fazi C, po izbiri upstream providerja — glej
-odprta tehnična vprašanja v `CM_Relay_OTA_arhitektura_2026-08-10.md` §20.
+**PHP + SQLite**, isti vzorec kot obstoječi Financing modul (izolirana,
+transakcijsko varna baza za majhen obseg — CM je sicer namenoma PHP/JSON-first,
+glej `pro_dev_roadmap`). Izbrano po Fazi D (Channex), kot je bilo predvideno.
+
+**Particioniranje od prvega dne (rast brez prihodnje migracije):**
+
+- **Registry** (`installations`, `service_entitlements`, `provider_accounts`,
+  `property_mappings`, `unit_mappings`, `audit_log`, `consent_records`) — ena
+  skupna SQLite baza. Raste počasi (ena vrstica na namestitev), nikoli ne bo
+  ozko grlo pri ciljnem obsegu (deset do nekaj sto namestitev).
+- **Events/commands** (`events`, `commands`) — **ločena SQLite datoteka na
+  namestitev** (`events_<installation_id>.sqlite`), ne ena skupna tabela. To
+  je isti vzorec kot CM-jev obstoječi JSON-po-enoti/letu pristop, samo
+  prenesen na Relay. Ker skoraj vsaka operacija (namestitev pollira SVOJO
+  vrsto, Relay pošlje event SVOJI namestitvi) po naravi zadeva eno samo
+  namestitev, ne rabi pravega distribuiranega usmerjevalnika — lookup v
+  registry tabeli ("namestitev X → datoteka events_X.sqlite") zadostuje.
+
+**Razlog:** če Relay kdaj preraste en SQLite file (veliko namestitev, veliko
+dogodkov skozi čas), je edini del, ki bi to sploh občutil, events/commands, ne
+registry — in ta je že particioniran, torej "rast" pomeni samo dodajanje
+novih datotek, ne migracije obstoječe sheme. Če bi kdaj sam (majhen, skupen)
+registry postal ozko grlo, se zamenja samo ta en kos (npr. na Postgres), brez
+prepisovanja event/command logike.
+
+**Hosting:** obstoječa pro-dev domena (registrirana za 1 leto) je kandidat za
+Relay gostovanje, ko se dejansko postavi — po potrebi posvečena izključno
+Relayju in podaljšana za daljše obdobje. Odločitev ob dejanski postavitvi, ne
+blokira Fazo D dela.
 
 ## Struktura
 
