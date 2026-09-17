@@ -112,6 +112,32 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
         return $this->request('POST', '/restrictions', ['values' => [$entry]]);
     }
 
+    /**
+     * Sends multiple date/value entries in a SINGLE API call. Required by
+     * Channex certification test #3/#4: "Your integration must batch these
+     * into 1 API call. If your current code loops per-date, this is a sign
+     * you need to refactor before certifying." $entries is an array of
+     * associative arrays, each needing at minimum property_id, rate_plan_id,
+     * and date (or date_from/date_to) plus whatever value keys apply.
+     */
+    public function pushBatch(array $entries): ProviderResult
+    {
+        if (empty($entries)) {
+            return new ProviderResult(false, 'entries required');
+        }
+
+        foreach ($entries as $entry) {
+            if (empty($entry['property_id']) || empty($entry['rate_plan_id'])) {
+                return new ProviderResult(false, 'each entry needs property_id and rate_plan_id');
+            }
+            if (empty($entry['date']) && (empty($entry['date_from']) || empty($entry['date_to']))) {
+                return new ProviderResult(false, 'each entry needs date, or date_from+date_to');
+            }
+        }
+
+        return $this->request('POST', '/restrictions', ['values' => array_values($entries)]);
+    }
+
     public function requestFullSync(string $propertyId): ProviderResult
     {
         return new ProviderResult(false, 'not yet verified against a live channel - no OTA channel configured in sandbox as of 2026-09-16');
