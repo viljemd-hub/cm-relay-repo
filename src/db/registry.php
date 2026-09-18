@@ -12,9 +12,44 @@
 
 declare(strict_types=1);
 
+/**
+ * Defaults to <repo>/data for local/dev use. A real deployment sets
+ * RELAY_PRIVATE_ROOT (e.g. via Apache SetEnv) to a directory OUTSIDE the
+ * DocumentRoot entirely - not just Apache-deny-protected inside it - so
+ * SQLite files/secrets can never be served regardless of any future vhost
+ * misconfiguration. See secrets/README or the deployment notes for
+ * cmrelay.duckdns.org (data lives in /var/www/html/relay-private/data).
+ */
+/**
+ * mod_php doesn't reliably surface Apache's SetEnv through getenv() -
+ * $_SERVER is the documented, reliable way to read it under mod_php,
+ * while getenv() is what CLI usage (cron, bin/*.php) actually needs.
+ * Check both rather than guessing which SAPI is running.
+ */
+function relay_private_root_override(): ?string
+{
+    $value = $_SERVER['RELAY_PRIVATE_ROOT'] ?? getenv('RELAY_PRIVATE_ROOT');
+    return ($value !== false && $value !== null && $value !== '') ? $value : null;
+}
+
 function relay_data_root(): string
 {
+    $override = relay_private_root_override();
+    if ($override !== null) {
+        return rtrim($override, '/') . '/data';
+    }
+
     return dirname(__DIR__, 2) . '/data';
+}
+
+function relay_secrets_root(): string
+{
+    $override = relay_private_root_override();
+    if ($override !== null) {
+        return rtrim($override, '/') . '/secrets';
+    }
+
+    return dirname(__DIR__, 2) . '/secrets';
 }
 
 function relay_registry_path(): string
@@ -174,6 +209,28 @@ function relay_lookup_unit_mapping(string $installationId, string $cmUnitId): ?a
         WHERE pm.installation_id = ? AND um.cm_unit_id = ?
     ');
     $stmt->execute([$installationId, $cmUnitId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return $row !== false ? $row : null;
+}
+
+/**
+ * Reverse of relay_lookup_unit_mapping() - given a provider's own property_id
+ * (what a webhook payload carries), find which CM installation owns it. A
+ * webhook has no installation token to authenticate with directly, so this
+ * lookup IS the authentication: an unmapped property_id is rejected outright.
+ *
+ * @return array{installation_id: string, installation_uuid: string, cm_property_id: string}|null
+ */
+function relay_lookup_installation_by_provider_property(string $provider, string $providerPropertyId): ?array
+{
+    $stmt = relay_registry_db()->prepare('
+        SELECT i.id AS installation_id, i.installation_uuid, pm.cm_property_id
+        FROM property_mappings pm
+        JOIN installations i ON i.id = pm.installation_id
+        WHERE pm.provider = ? AND pm.provider_property_id = ?
+    ');
+    $stmt->execute([$provider, $providerPropertyId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
     return $row !== false ? $row : null;
