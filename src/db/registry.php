@@ -236,6 +236,28 @@ function relay_lookup_installation_by_provider_property(string $provider, string
     return $row !== false ? $row : null;
 }
 
+/**
+ * Reverse of relay_lookup_unit_mapping() in the OTHER direction - given a
+ * provider's own room_type_id, find which cm_unit_id it maps to. Needed
+ * when normalizing an inbound booking (Channex only ever speaks in its own
+ * room_type_id, never our cm_unit_id) - local CM should never need to know
+ * Channex's IDs at all, so this translation happens here, on the Relay
+ * side, before an event is ever handed to local CM.
+ */
+function relay_lookup_cm_unit_by_provider_room_type(string $installationId, string $provider, string $providerRoomTypeId): ?string
+{
+    $stmt = relay_registry_db()->prepare('
+        SELECT um.cm_unit_id
+        FROM unit_mappings um
+        JOIN property_mappings pm ON pm.id = um.property_mapping_id
+        WHERE pm.installation_id = ? AND pm.provider = ? AND um.provider_room_type_id = ?
+    ');
+    $stmt->execute([$installationId, $provider, $providerRoomTypeId]);
+    $row = $stmt->fetchColumn();
+
+    return $row !== false ? (string)$row : null;
+}
+
 function relay_audit(string $action, ?string $targetType = null, ?string $targetId = null, ?string $actor = null): void
 {
     $stmt = relay_registry_db()->prepare(

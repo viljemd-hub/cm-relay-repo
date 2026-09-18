@@ -197,6 +197,30 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
         return new ProviderResult(false, 'not yet verified against a live channel - no OTA channel configured in sandbox as of 2026-09-16');
     }
 
+    /**
+     * A webhook's own payload is deliberately NOT trusted as authoritative
+     * (Channex's own docs: "consider webhooks as triggers to pull current
+     * state" - delivery order isn't guaranteed). For booking_* events, this
+     * is the real read: GET /booking_revisions/feed?filter[property_id]=X,
+     * one page (Channex's own default page size).
+     */
+    public function fetchBookingRevisions(string $propertyId): ProviderResult
+    {
+        return $this->request('GET', '/booking_revisions/feed?' . http_build_query([
+            'filter' => ['property_id' => $propertyId],
+        ]));
+    }
+
+    /**
+     * Must be called after successfully processing a revision - Channex
+     * emails a warning if a revision sits unacknowledged for ~30 minutes,
+     * and won't stop re-delivering it via the feed until acked.
+     */
+    public function acknowledgeBookingRevision(string $revisionId): ProviderResult
+    {
+        return $this->request('POST', '/booking_revisions/' . urlencode($revisionId) . '/ack');
+    }
+
     public function normalizeIncomingEvent(array $providerPayload): array
     {
         // Documented shape only, not exercised against a real webhook yet.
