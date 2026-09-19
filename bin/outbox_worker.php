@@ -87,13 +87,19 @@ foreach ($installations as $installation) {
             continue;
         }
 
+        // Per-mapping percentage corrector (added 2026-09-19) - CM's own
+        // price is never modified; the correction is applied only here, on
+        // the way out to this specific channel/rate plan, to account for
+        // that platform's own commission being higher/lower than another.
+        $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+
         $entries = [];
         foreach ($prices as $date => $price) {
             $entries[] = [
                 'property_id' => $mapping['provider_property_id'],
                 'rate_plan_id' => $mapping['provider_rate_plan_id'],
                 'date' => $date,
-                'rate' => (int)round((float)$price * 100),
+                'rate' => (int)round((float)$price * $correctorMultiplier * 100),
             ];
         }
 

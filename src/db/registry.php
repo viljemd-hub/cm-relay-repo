@@ -135,9 +135,22 @@ function relay_registry_migrate(PDO $pdo): void
             cm_unit_id TEXT NOT NULL,
             provider_room_type_id TEXT NOT NULL,
             provider_rate_plan_id TEXT NOT NULL,
+            price_corrector_pct REAL NOT NULL DEFAULT 0,
             UNIQUE(property_mapping_id, cm_unit_id)
         )
     ');
+
+    // price_corrector_pct: added 2026-09-19, after unit_mappings already
+    // shipped without it - SQLite's CREATE TABLE IF NOT EXISTS above is a
+    // no-op on an existing file, so older registries need an explicit
+    // ALTER. Per-mapping (not per-unit, not global) since the whole point
+    // is different platforms/rate plans needing different corrections for
+    // their own commission structure - a unit sold on two channels can
+    // need two different correctors.
+    $existingCols = array_column($pdo->query('PRAGMA table_info(unit_mappings)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    if (!in_array('price_corrector_pct', $existingCols, true)) {
+        $pdo->exec('ALTER TABLE unit_mappings ADD COLUMN price_corrector_pct REAL NOT NULL DEFAULT 0');
+    }
 
     $pdo->exec('
         CREATE TABLE IF NOT EXISTS audit_log (
@@ -198,12 +211,12 @@ function relay_uuid_v4(): string
 }
 
 /**
- * @return array{provider: string, provider_property_id: string, provider_room_type_id: string, provider_rate_plan_id: string}|null
+ * @return array{provider: string, provider_property_id: string, provider_room_type_id: string, provider_rate_plan_id: string, price_corrector_pct: float}|null
  */
 function relay_lookup_unit_mapping(string $installationId, string $cmUnitId): ?array
 {
     $stmt = relay_registry_db()->prepare('
-        SELECT pm.provider, pm.provider_property_id, um.provider_room_type_id, um.provider_rate_plan_id
+        SELECT pm.provider, pm.provider_property_id, um.provider_room_type_id, um.provider_rate_plan_id, um.price_corrector_pct
         FROM unit_mappings um
         JOIN property_mappings pm ON pm.id = um.property_mapping_id
         WHERE pm.installation_id = ? AND um.cm_unit_id = ?
