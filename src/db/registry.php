@@ -163,6 +163,22 @@ function relay_registry_migrate(PDO $pdo): void
         )
     ');
 
+    // Beta feedback (added 2026-09-21) - minimal reuse of the existing
+    // installation_id/token auth instead of building a new feedback system
+    // from scratch. Shared registry DB (not per-installation), since the
+    // owner reads all feedback from every beta installation in one place -
+    // there is no reason to partition this by installation the way
+    // events/commands are.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS installation_feedback (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL REFERENCES installations(id),
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT "new",
+            created_at TEXT NOT NULL
+        )
+    ');
+
     // Global rate limiter state - Channex's 20 ARI-calls/minute limit is per
     // ACCOUNT, i.e. shared across every connected installation once the
     // relay/reseller model is live, not per installation. Lives in the
@@ -277,4 +293,14 @@ function relay_audit(string $action, ?string $targetType = null, ?string $target
         'INSERT INTO audit_log (id, actor, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
     );
     $stmt->execute([relay_uuid_v4(), $actor, $action, $targetType, $targetId, gmdate('c')]);
+}
+
+function relay_save_feedback(string $installationId, string $message): string
+{
+    $id = relay_uuid_v4();
+    relay_registry_db()->prepare(
+        'INSERT INTO installation_feedback (id, installation_id, message, status, created_at) VALUES (?, ?, ?, "new", ?)'
+    )->execute([$id, $installationId, $message, gmdate('c')]);
+
+    return $id;
 }
