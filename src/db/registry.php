@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: src/db/registry.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Shared SQLite registry (one file, per README "Jezik / framework / hosting"
  * 2026-09-17 decision): installations, mappings, entitlements, audit. Grows

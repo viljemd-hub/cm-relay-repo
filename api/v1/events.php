@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: api/v1/events.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * GET /api/v1/events
  * Auth: Authorization: Bearer <installation token>

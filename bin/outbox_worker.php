@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: bin/outbox_worker.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Drains pending commands (price, availability, min_stay) across ALL
  * installations and pushes them to Channex, respecting the shared

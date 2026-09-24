@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: api/v1/_lib/auth.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Per-installation bearer token auth. No global master secret (README
  * "Trdna pravila" - every installation has its own token, revoke/rotate

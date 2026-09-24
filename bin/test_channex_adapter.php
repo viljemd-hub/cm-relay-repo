@@ -1,5 +1,11 @@
 <?php
 /**
+ * CM Relay
+ * File: bin/test_channex_adapter.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
+ *
  * Manual smoke test for ChannexAdapter against the sandbox demo property.
  * Not a unit test suite - Faza D is a single provider proving the interface end
  * to end, this script is that proof. Run: php bin/test_channex_adapter.php

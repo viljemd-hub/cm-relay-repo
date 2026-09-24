@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: api/v1/installations/register.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * POST /api/v1/installations/register
  * Body: {installation_uuid, edition, cm_version, connector_version, unit_count, locale}

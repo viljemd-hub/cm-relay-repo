@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: api/v1/webhooks/channex.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * POST target registered with Channex (Organization → Webhooks). Per
  * Channex's own docs: "consider webhooks as triggers to pull current state

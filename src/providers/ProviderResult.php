@@ -2,6 +2,9 @@
 /**
  * CM Relay — skeleton
  * File: src/providers/ProviderResult.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Return value shape for CmConnectivityProviderAdapter operations that don't
  * need a full status object. Not implemented yet - Faza D.

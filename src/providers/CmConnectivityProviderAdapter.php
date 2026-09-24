@@ -2,6 +2,9 @@
 /**
  * CM Relay — skeleton
  * File: src/providers/CmConnectivityProviderAdapter.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Provider-neutral interface (see CM_Relay_OTA_arhitektura_2026-08-10.md §8).
  * Relay must never be built as "ChannexRelay" - every upstream OTA connectivity

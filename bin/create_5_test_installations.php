@@ -1,5 +1,11 @@
 <?php
 /**
+ * CM Relay
+ * File: bin/create_5_test_installations.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
+ *
  * One-off provisioning script: creates 5 separate Channex properties (one unit
  * each), simulating 5 independent CM installations sharing a single Channex
  * contract via the relay/white-label model. Prints the resulting mapping table

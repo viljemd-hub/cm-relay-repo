@@ -2,6 +2,9 @@
 /**
  * CM Relay — skeleton
  * File: src/providers/ProviderStatus.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Connection status shape returned by CmConnectivityProviderAdapter::connectionStatus().
  * Not implemented yet - Faza D.

@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: api/v1/mappings.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * POST /api/v1/mappings
  * Auth: Authorization: Bearer <installation token>

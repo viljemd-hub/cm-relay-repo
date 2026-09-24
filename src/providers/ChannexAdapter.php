@@ -2,6 +2,9 @@
 /**
  * CM Relay — Channex provider adapter (Faza D)
  * File: src/providers/ChannexAdapter.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * First real CmConnectivityProviderAdapter implementation, built and verified
  * against the free Channex staging/sandbox environment (https://staging.channex.io),

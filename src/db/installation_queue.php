@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: src/db/installation_queue.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * One SQLite file per installation for events/commands (README 2026-09-17
  * decision) - this is the part that actually grows over time, so it's

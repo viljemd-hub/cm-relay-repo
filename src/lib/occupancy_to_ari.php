@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: src/lib/occupancy_to_ari.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Converts a CM occupancy_merged.json snapshot (list of start/end/status/
  * lock segments, end-exclusive nights - same convention as cm_regen_merged

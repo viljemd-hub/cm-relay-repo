@@ -1,5 +1,11 @@
 <?php
 /**
+ * CM Relay
+ * File: bin/test_5_installations_roundtrip.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
+ *
  * Proves the relay/white-label premise: one Channex account/contract driving
  * 5 independent "CM installations" via ChannexAdapter, each pushed a different
  * rate, then re-read to confirm no cross-contamination between installations.

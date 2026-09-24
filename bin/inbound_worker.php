@@ -2,6 +2,9 @@
 /**
  * CM Relay
  * File: bin/inbound_worker.php
+ * Author: Viljem Dvojmoč
+ * Assistant: Claude
+ * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Processes pending ('received') inbound events across ALL installations -
  * the second half of the webhook pipeline (api/v1/webhooks/channex.php only
