@@ -6,8 +6,8 @@
  * Assistant: Claude
  * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
- * Drains pending commands (price, availability, min_stay) across ALL
- * installations and pushes them to Channex, respecting the shared
+ * Drains pending commands (price, availability, min_stay, full_sync) across
+ * ALL installations and pushes them to Channex, respecting the shared
  * 20-calls/minute account-wide rate limit (see Channex PMS Certification
  * Tests §12 - this is per ACCOUNT, not per installation, since one contract
  * serves many installations). Meant to run periodically (cron), not as a
@@ -180,6 +180,80 @@ foreach ($installations as $installation) {
             $error = !$availResult->ok ? $availResult->error : ($restrResult->error ?? 'rate_limited_between_calls');
             markFailed($queue, $allIds, (string)$error);
             echo "FAIL installation={$installation['installation_uuid']} unit=$unit reason=availability error=$error\n";
+        }
+    }
+
+    // --- full_sync commands: Channex PMS Certification Tests §1/§8 - the
+    // full 500-day picture (rates + restrictions + availability) pushed in
+    // exactly 2 API calls, when a mapping first goes live. NOT a timer
+    // (that would violate §13). CM side already bundled prices + occupancy
+    // + min_nights into one snapshot (cm_connector_prepare_unit_snapshot,
+    // reason='full_sync') specifically so this stays 2 calls, not 2*N. ---
+    $pendingFullSync = $queue->query('SELECT * FROM commands WHERE status = "pending" AND reason = "full_sync" ORDER BY created_at ASC')
+        ->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($pendingFullSync as $command) {
+        if (!relay_rate_limit_ok('channex', 20)) {
+            $skippedRateLimit++;
+            continue;
+        }
+
+        $mapping = relay_lookup_unit_mapping($installation['id'], (string)$command['unit']);
+        if ($mapping === null) {
+            $skippedNoMapping++;
+            continue;
+        }
+
+        $payload = json_decode((string)$command['payload'], true) ?? [];
+        $prices = is_array($payload['prices'] ?? null) ? $payload['prices'] : [];
+        $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
+        $minNights = (int)($payload['min_nights'] ?? 1);
+        $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+
+        $built = relay_build_availability_entries(
+            $mapping['provider_property_id'],
+            $mapping['provider_room_type_id'],
+            $mapping['provider_rate_plan_id'],
+            $segments,
+            $minNights
+            // windowDays defaults to 500 - matches the certification spec exactly
+        );
+
+        // Merge the real CM price into each restriction entry - §1 wants
+        // rate + restrictions together in one call, not split in two.
+        foreach ($built['restrictions'] as &$entry) {
+            if (isset($prices[$entry['date']])) {
+                $entry['rate'] = (int)round((float)$prices[$entry['date']] * $correctorMultiplier * 100);
+            }
+        }
+        unset($entry);
+        // Only push dates CM actually has a price for - a restriction entry
+        // with no real rate isn't what §1 is asking for.
+        $restrictionEntries = array_values(array_filter($built['restrictions'], static fn($e) => isset($e['rate'])));
+
+        if (empty($restrictionEntries)) {
+            markFailed($queue, [$command['id']], 'no_price_data_in_window');
+            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync error=no_price_data_in_window\n";
+            continue;
+        }
+
+        relay_rate_limit_record_call('channex');
+        $availResult = $adapter->pushAvailabilityBatch($built['availability']);
+
+        $restrResult = null;
+        if ($availResult->ok && relay_rate_limit_ok('channex', 20)) {
+            relay_rate_limit_record_call('channex');
+            $restrResult = $adapter->pushBatch($restrictionEntries);
+        }
+
+        if ($availResult->ok && $restrResult !== null && $restrResult->ok) {
+            markSent($queue, [$command['id']]);
+            $pushed++;
+            echo "OK  installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync availability_days=" . count($built['availability']) . " rate_days=" . count($restrictionEntries) . " (2 API calls)\n";
+        } else {
+            $error = !$availResult->ok ? $availResult->error : ($restrResult->error ?? 'rate_limited_between_calls');
+            markFailed($queue, [$command['id']], (string)$error);
+            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync error=$error\n";
         }
     }
 }
