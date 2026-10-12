@@ -154,13 +154,15 @@ foreach ($installations as $installation) {
         $payload = json_decode((string)$newest['payload'], true) ?? [];
         $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
         $minNights = (int)($payload['min_nights'] ?? 1);
+        $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
 
         $built = relay_build_availability_entries(
             $mapping['provider_property_id'],
             $mapping['provider_room_type_id'],
             $mapping['provider_rate_plan_id'],
             $segments,
-            $minNights
+            $minNights,
+            $maxNights
         );
 
         relay_rate_limit_record_call('channex');
@@ -208,6 +210,7 @@ foreach ($installations as $installation) {
         $prices = is_array($payload['prices'] ?? null) ? $payload['prices'] : [];
         $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
         $minNights = (int)($payload['min_nights'] ?? 1);
+        $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
         $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
 
         $built = relay_build_availability_entries(
@@ -215,7 +218,8 @@ foreach ($installations as $installation) {
             $mapping['provider_room_type_id'],
             $mapping['provider_rate_plan_id'],
             $segments,
-            $minNights
+            $minNights,
+            $maxNights
             // windowDays defaults to 500 - matches the certification spec exactly
         );
 

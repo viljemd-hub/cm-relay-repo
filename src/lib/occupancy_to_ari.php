@@ -74,6 +74,7 @@ function relay_build_availability_entries(
     string $ratePlanId,
     array $occupancySegments,
     int $minNights,
+    ?int $maxNights = null,
     int $windowDays = 500
 ): array {
     $blocked = relay_occupancy_segments_to_blocked_dates($occupancySegments);
@@ -91,7 +92,7 @@ function relay_build_availability_entries(
             'availability' => isset($blocked[$date]) ? 0 : 1,
         ];
 
-        $restrictionEntries[] = [
+        $restriction = [
             'property_id' => $propertyId,
             'rate_plan_id' => $ratePlanId,
             'date' => $date,
@@ -101,6 +102,13 @@ function relay_build_availability_entries(
             'min_stay_arrival' => $minNights,
             'min_stay_through' => $minNights,
         ];
+        // No CM-side default - omit 'max_stay' entirely rather than
+        // inventing a cap when the operator never set one, same "no
+        // default" rule as booking.max_nights itself.
+        if ($maxNights !== null) {
+            $restriction['max_stay'] = $maxNights;
+        }
+        $restrictionEntries[] = $restriction;
 
         $cursor = $cursor->modify('+1 day');
     }
