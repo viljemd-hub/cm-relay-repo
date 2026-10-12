@@ -68,7 +68,13 @@ if ($propRow === false) {
         VALUES (?, ?, ?, ?, ?)
     ')->execute([$propId, $installation['id'], $body['cm_property_id'], $body['provider'], $body['provider_property_id']]);
 } else {
+    // Re-mapping to a different provider property (e.g. the old sandbox
+    // property was deleted and rebuilt) must actually update the stored
+    // provider_property_id - previously this silently kept the stale one,
+    // since only unit_mappings' room_type/rate_plan were ever updated here.
     $propId = $propRow['id'];
+    $db->prepare('UPDATE property_mappings SET provider = ?, provider_property_id = ? WHERE id = ?')
+        ->execute([$body['provider'], $body['provider_property_id'], $propId]);
 }
 
 $existingUnit = $db->prepare('SELECT id, price_corrector_pct FROM unit_mappings WHERE property_mapping_id = ? AND cm_unit_id = ?');
