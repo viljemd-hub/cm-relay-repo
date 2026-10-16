@@ -10,6 +10,10 @@
  * against the free Channex staging/sandbox environment (https://staging.channex.io),
  * demo property "Apartma Matevž Demo" (2026-09-16).
  *
+ * 2026-10-13: PMS certification passed, subscribed to the paid Whitelabel
+ * plan, switched to the real production API (https://app.channex.io) -
+ * staging is no longer the live target, see secrets/channex_production.json.
+ *
  * Verified live against the sandbox:
  *   - GET  /api/v1/properties, /api/v1/room_types, /api/v1/rate_plans
  *   - GET/POST /api/v1/restrictions (rate + min_stay_arrival/through, keyed by rate_plan_id)
@@ -40,7 +44,7 @@ require_once __DIR__ . '/ProviderStatus.php';
 
 final class ChannexAdapter implements CmConnectivityProviderAdapter
 {
-    private const BASE_URL = 'https://staging.channex.io/api/v1';
+    private const BASE_URL = 'https://app.channex.io/api/v1';
 
     public function __construct(private readonly string $apiKey)
     {
@@ -86,6 +90,26 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
      * silently reverted. $payload: property_id, provider_room_type_id, date
      * (or date_from/date_to), availability.
      */
+    /**
+     * Read-back availability for a room_type over a date range - the GET
+     * counterpart of pushAvailability(). Used by the channel-presence
+     * confirmation gate (docs/cm_relay/direct_booking_channel_confirmation_gate.md)
+     * to verify a just-pushed block is actually visible on Channex's side
+     * before letting a direct-booking SMS code go out. Returns raw decoded
+     * data: {"data": {"<room_type_id>": {"<date>": <int availability>}}}.
+     */
+    public function getAvailability(string $propertyId, string $roomTypeId, string $dateFrom, string $dateTo): ProviderResult
+    {
+        $qs = http_build_query([
+            'filter' => [
+                'property_id' => $propertyId,
+                'room_type_id' => $roomTypeId,
+                'date' => ['gte' => $dateFrom, 'lte' => $dateTo],
+            ],
+        ]);
+        return $this->request('GET', '/availability?' . $qs);
+    }
+
     public function pushAvailability(array $payload): ProviderResult
     {
         $required = ['property_id', 'provider_room_type_id'];

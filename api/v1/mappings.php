@@ -35,6 +35,15 @@
  * price_corrector_pct per channel without needing to already know the
  * provider_room_type_id/provider_rate_plan_id - this is the read side of
  * the "price resolver" settings screen.
+ *
+ * DELETE /api/v1/mappings?unit_mapping_id=<id> (added 2026-10-16)
+ * Auth: Authorization: Bearer <installation token>
+ * Removes a stale/leftover unit_mapping - e.g. the early-dev-era "HOME"/
+ * "HOME 123456" test mappings on 57 that were left pointing at a dead
+ * sandbox Channex property and were polluting channel_presence_check.php's
+ * "is this really blocked everywhere" check with permanently-open noise.
+ * Scoped to the authenticated installation's own mappings only - a mapping
+ * id belonging to another installation 404s, never a cross-tenant delete.
  */
 
 declare(strict_types=1);
@@ -63,6 +72,34 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
     }, $rows->fetchAll(PDO::FETCH_ASSOC));
 
     echo json_encode(['ok' => true, 'mappings' => $mappings]);
+    exit;
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'DELETE') {
+    $unitMappingId = trim((string)($_GET['unit_mapping_id'] ?? ''));
+    if ($unitMappingId === '') {
+        http_response_code(400);
+        echo json_encode(['ok' => false, 'error' => 'unit_mapping_id required']);
+        exit;
+    }
+
+    $db = relay_registry_db();
+    $check = $db->prepare('
+        SELECT um.id FROM unit_mappings um
+        JOIN property_mappings pm ON pm.id = um.property_mapping_id
+        WHERE um.id = ? AND pm.installation_id = ?
+    ');
+    $check->execute([$unitMappingId, $installation['id']]);
+    if ($check->fetch(PDO::FETCH_ASSOC) === false) {
+        http_response_code(404);
+        echo json_encode(['ok' => false, 'error' => 'unit_mapping not found for this installation']);
+        exit;
+    }
+
+    $db->prepare('DELETE FROM unit_mappings WHERE id = ?')->execute([$unitMappingId]);
+    relay_audit('mapping.delete', 'unit_mapping', $unitMappingId, $installation['id']);
+
+    echo json_encode(['ok' => true, 'deleted' => $unitMappingId]);
     exit;
 }
 
