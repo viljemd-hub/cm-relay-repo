@@ -14,19 +14,28 @@
 declare(strict_types=1);
 
 /**
- * Only 'hard'-locked segments count as unavailable - mirrors CM's own
- * hard-beats-soft precedence rule (see cm_regen_merged_for_unit() GAP-01
- * fix), so a soft/tentative hold never wrongly blocks a channel sale.
+ * By default only 'hard'-locked segments count as unavailable - mirrors
+ * CM's own hard-beats-soft precedence rule (see cm_regen_merged_for_unit()
+ * GAP-01 fix), so a soft/tentative hold never wrongly blocks a channel sale.
+ *
+ * $includeSoft (added 2026-10-16, per-unit "API export mode" setting,
+ * mirrors the existing ICS "Booked only" vs "Booked + blocked" toggle -
+ * see admin/integrations.php): when true, local soft admin-blocks also
+ * count as unavailable on the way out to a channel. Intended default for
+ * real channel connections (Booking/Airbnb/VRBO etc. need the FULL true
+ * picture to avoid double-booking); false is for narrowly testing a new
+ * connection without exposing test-only local blocks externally.
  *
  * @param array<int, array<string, mixed>> $segments
  * @return array<string, true> set of blocked dates, keyed 'Y-m-d'
  */
-function relay_occupancy_segments_to_blocked_dates(array $segments): array
+function relay_occupancy_segments_to_blocked_dates(array $segments, bool $includeSoft = true): array
 {
     $blocked = [];
 
     foreach ($segments as $seg) {
-        if (($seg['lock'] ?? '') !== 'hard') {
+        $lock = (string)($seg['lock'] ?? '');
+        if ($lock !== 'hard' && !($includeSoft && $lock === 'soft')) {
             continue;
         }
         $start = (string)($seg['start'] ?? '');
@@ -75,9 +84,10 @@ function relay_build_availability_entries(
     array $occupancySegments,
     int $minNights,
     ?int $maxNights = null,
-    int $windowDays = 500
+    int $windowDays = 500,
+    bool $includeSoftBlocks = true
 ): array {
-    $blocked = relay_occupancy_segments_to_blocked_dates($occupancySegments);
+    $blocked = relay_occupancy_segments_to_blocked_dates($occupancySegments, $includeSoftBlocks);
 
     $availabilityEntries = [];
     $restrictionEntries = [];

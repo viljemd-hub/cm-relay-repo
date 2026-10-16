@@ -33,9 +33,9 @@ require_once __DIR__ . '/../src/db/installation_queue.php';
 require_once __DIR__ . '/../src/providers/ChannexAdapter.php';
 require_once __DIR__ . '/../src/lib/occupancy_to_ari.php';
 
-$apiKey = (json_decode(file_get_contents(relay_secrets_root() . '/channex_sandbox.json'), true))['api_key'] ?? null;
+$apiKey = (json_decode(file_get_contents(relay_secrets_root() . '/channex_production.json'), true))['api_key'] ?? null;
 if (!$apiKey) {
-    fwrite(STDERR, "No Channex API key in " . relay_secrets_root() . "/channex_sandbox.json\n");
+    fwrite(STDERR, "No Channex API key in " . relay_secrets_root() . "/channex_production.json\n");
     exit(1);
 }
 $adapter = new ChannexAdapter($apiKey);
@@ -155,6 +155,7 @@ foreach ($installations as $installation) {
         $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
         $minNights = (int)($payload['min_nights'] ?? 1);
         $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
+        $includeSoftBlocks = !array_key_exists('include_blocked_days', $payload) || (bool)$payload['include_blocked_days'];
 
         $built = relay_build_availability_entries(
             $mapping['provider_property_id'],
@@ -162,7 +163,9 @@ foreach ($installations as $installation) {
             $mapping['provider_rate_plan_id'],
             $segments,
             $minNights,
-            $maxNights
+            $maxNights,
+            500,
+            $includeSoftBlocks
         );
 
         relay_rate_limit_record_call('channex');
@@ -212,6 +215,7 @@ foreach ($installations as $installation) {
         $minNights = (int)($payload['min_nights'] ?? 1);
         $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
         $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+        $includeSoftBlocks = !array_key_exists('include_blocked_days', $payload) || (bool)$payload['include_blocked_days'];
 
         $built = relay_build_availability_entries(
             $mapping['provider_property_id'],
@@ -219,8 +223,10 @@ foreach ($installations as $installation) {
             $mapping['provider_rate_plan_id'],
             $segments,
             $minNights,
-            $maxNights
+            $maxNights,
             // windowDays defaults to 500 - matches the certification spec exactly
+            500,
+            $includeSoftBlocks
         );
 
         // Merge the real CM price into each restriction entry - §1 wants
