@@ -27,6 +27,14 @@
  * price is never touched - see outbox_worker.php. Re-POSTing an existing
  * mapping updates the corrector in place (the one field on a mapping
  * expected to change without recreating the mapping).
+ *
+ * GET /api/v1/mappings (added 2026-10-16)
+ * Auth: Authorization: Bearer <installation token>
+ * Lists every unit_mapping for this installation, so a local CM admin UI
+ * can show current channel/rate-plan mappings and let the user edit
+ * price_corrector_pct per channel without needing to already know the
+ * provider_room_type_id/provider_rate_plan_id - this is the read side of
+ * the "price resolver" settings screen.
  */
 
 declare(strict_types=1);
@@ -35,13 +43,35 @@ header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/_lib/auth.php';
 
-if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['ok' => false, 'error' => 'POST required']);
+$installation = relay_require_auth();
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET') {
+    $db = relay_registry_db();
+    $rows = $db->prepare('
+        SELECT um.id AS unit_mapping_id, um.cm_unit_id, um.provider_room_type_id,
+               um.provider_rate_plan_id, um.price_corrector_pct,
+               pm.id AS property_mapping_id, pm.cm_property_id, pm.provider, pm.provider_property_id
+        FROM unit_mappings um
+        JOIN property_mappings pm ON pm.id = um.property_mapping_id
+        WHERE pm.installation_id = ?
+        ORDER BY um.cm_unit_id, pm.provider
+    ');
+    $rows->execute([$installation['id']]);
+    $mappings = array_map(static function (array $r): array {
+        $r['price_corrector_pct'] = (float)$r['price_corrector_pct'];
+        return $r;
+    }, $rows->fetchAll(PDO::FETCH_ASSOC));
+
+    echo json_encode(['ok' => true, 'mappings' => $mappings]);
     exit;
 }
 
-$installation = relay_require_auth();
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['ok' => false, 'error' => 'POST or GET required']);
+    exit;
+}
+
 $body = json_decode(file_get_contents('php://input'), true);
 if (!is_array($body)) {
     $body = [];
