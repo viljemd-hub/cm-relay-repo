@@ -1,11 +1,28 @@
-# CM Relay — skeleton (ni aktiven servis)
+# CM Relay
 
-Ta repo je **prazno ogrodje**, ne delujoč servis. Sledi dvema arhitekturnima
-dokumentoma (glej `/home/apartma/Dokumenti/Guestbook/`):
+The connectivity hub for [CM Free / CM Plus](https://github.com/viljemd-hub/channel-manager) installations — the piece that lets a small, self-hosted channel manager talk to the big OTA world (Airbnb, Vrbo, Booking.com, and beyond) without giving up ownership of its own calendar, prices, or guest data.
 
-- `CM_Relay_OTA_arhitektura_2026-08-10.md` — osnovna OTA connectivity arhitektura
-- `CM_Ecosystem_Community_AI_ICS_Addendum_2026-08-10.md` — nadgradnja: Relay
-  ni samo OTA transportni sloj, ampak nosilec treh vzporednih storitev
+> Own your calendar, own your data — and still show up everywhere a guest might look.
+
+## Why this exists
+
+CM Free/Plus is built around the idea that a small accommodation provider shouldn't need a SaaS subscription just to keep their own calendar straight. But OTA distribution is a different problem: Airbnb, Vrbo and Booking.com don't talk ICS-only self-hosted apps directly — they talk to certified channel managers through providers like Channex.
+
+CM Relay is that bridge. It's a thin, provider-agnostic hub that sits between any number of self-hosted CM installations and whichever OTA connectivity provider is behind it today. Local CM stays the source of truth for reservations, prices and availability — Relay only ever carries what needs to go out, and what comes back.
+
+## What's real today
+
+This isn't a skeleton — it's running production traffic:
+
+- **Channex PMS certification passed**, subscribed to their production platform. Not a sandbox exercise — real properties, real OTA accounts.
+- **Live two-way sync** proven end-to-end: a price change in a local CM calendar reaches the OTA's own listing within the same minute; availability (including admin-side manual blocks) stays consistent in both directions.
+- **Per-channel price correction** — one CM price, independently adjusted per OTA (e.g. to absorb a platform's commission) without ever touching CM's own stored price.
+- **Channel-presence confirmation gate** — before a direct-booking confirmation code goes out to a guest, Relay independently verifies the block is actually visible on every connected channel first. Closes the exact race condition that makes direct bookings risky without a channel manager.
+- **Per-installation bearer tokens**, no global master secret. Every installation can be revoked or rotated independently.
+
+Provider support today: **Channex** (Vrbo live, Airbnb in progress, Booking.com paused pending their Extranet step — see `docs/cm_relay/`). The provider interface (`src/providers/CmConnectivityProviderAdapter.php`) is deliberately adapter-based, so a second provider (Beds24, WuBook, or a direct OTA integration) is an additional implementation, not a rewrite.
+
+## Architecture
 
 ```text
                          CM ECOSYSTEM
@@ -18,97 +35,48 @@ dokumentoma (glej `/home/apartma/Dokumenti/Guestbook/`):
         ▼                     ▼                      ▼
  OTA Connectivity        CM Community          Shared Services
         │                     │                      │
- Booking/Airbnb          Public discovery       AI query layer
- Beds24/Channex          Availability share     Referrals
- WuBook/native           Community search       Future services
+ Vrbo (live)             Public discovery       AI query layer
+ Airbnb (in progress)    Availability share     Referrals
+ Booking.com (paused)    Community search       Future services
 ```
 
-CM Relay je centralni, provider-agnostic registry, entitlement in
-connectivity service za prostovoljno vključene CM Free/Plus/PRO namestitve.
-Lokalni CM (source of truth za rezervacije/cene/availability) se opcijsko
-poveže prek **CM Connector** (glej `common/lib/cm_connector.php` v
-`channel-manager-free` in `pro-dev-repo`), z 4 neodvisnimi service opt-in
-stikali: Connectivity, Community, Sharing/referrals, AI discovery.
+OTA Connectivity is live. CM Community and Shared Services are the roadmap this hub is deliberately built to support, not yet built out — see `docs/cm_relay/` for the design notes.
 
-## Dve trdni pravili, ki veljajo ne glede na fazo
+Two rules that hold regardless of what gets built on top:
 
-> **ICS fallback je trajna core capability vseh CM izdaj in ga nobena
-> prihodnja API integracija ne sme odstraniti ali narediti odvisnega od
-> centralnega Relayja.** ICS engine živi vedno v lokalnem CM, nikoli tukaj.
+> **ICS fallback is a permanent core capability of every CM edition, and no future API integration may remove it or make it depend on this Relay.** The ICS engine always lives in local CM, never here — a paid Relay outage or a provider going down must never take down a local installation's basic calendar.
 
-> **Vključitev v CM Ecosystem (katerakoli storitev - Connectivity, Community,
-> Sharing, AI) je vedno zavestna, razložena in modularna opt-in odločitev
-> uporabnika.** Nobena storitev se ne vklopi sama, ločeno od ostalih.
+> **Joining any CM Ecosystem service (Connectivity, Community, Sharing, AI discovery) is always an explicit, explained, modular opt-in.** No service turns itself on, and none is bundled with another.
 
-## Stanje
+## Data model
 
-- **Faza A (trenutno):** samo ta skelet — mapna struktura, protokol osnutek, provider
-  adapter interface, Community/AI/health/dedupe rezervirana mesta. Brez delujoče
-  logike, brez baze, brez deploya.
-- **Faza B:** lokalni CM Connector MVP (v CM repojih) — ni del tega repoja.
-- **Faza C:** dejanska implementacija modulov spodaj — šele potem, ko je izbran prvi
-  upstream provider (Beds24 / WuBook / Channex, glej OTA brief §12/§15) in ko so
-  odgovori na odprta vprašanja iz §20 znani.
-- **Faza D:** prvi provider adapter (`src/providers/`).
-- Community portal, AI query engine in resnična OTA API koda **niso** del
-  trenutne faze — glej Ecosystem addendum §32: barebone mora biti samo
-  *ready for it*, ne dograjen produkt.
+- **Registry** (`installations`, `property_mappings`, `unit_mappings`, `audit_log`, `consent_records`) — one shared SQLite database. Grows slowly (one row per installation), never the bottleneck at the realistic scale this serves.
+- **Events/commands** — a separate SQLite file per installation, not one shared table. Matches CM's own existing per-unit/per-year JSON convention, just carried over to the Relay. See `docs/data_model.md`.
 
-## Jezik / framework / hosting (odločeno 2026-09-17)
+Secrets (`secrets/`) and runtime data (`data/`) are gitignored and were never part of this repository's history — provider API keys, installation tokens and webhook secrets live only on the deployment, never in source.
 
-**PHP + SQLite**, isti vzorec kot obstoječi Financing modul (izolirana,
-transakcijsko varna baza za majhen obseg — CM je sicer namenoma PHP/JSON-first,
-glej `pro_dev_roadmap`). Izbrano po Fazi D (Channex), kot je bilo predvideno.
+## Getting involved
 
-**Particioniranje od prvega dne (rast brez prihodnje migracije):**
+This is still a young, fast-moving project — the Relay exists to make a specific thing (small self-hosted CM installations reaching real OTA distribution) work, not to be a general-purpose integration platform. That said:
 
-- **Registry** (`installations`, `service_entitlements`, `provider_accounts`,
-  `property_mappings`, `unit_mappings`, `audit_log`, `consent_records`) — ena
-  skupna SQLite baza. Raste počasi (ena vrstica na namestitev), nikoli ne bo
-  ozko grlo pri ciljnem obsegu (deset do nekaj sto namestitev).
-- **Events/commands** (`events`, `commands`) — **ločena SQLite datoteka na
-  namestitev** (`events_<installation_id>.sqlite`), ne ena skupna tabela. To
-  je isti vzorec kot CM-jev obstoječi JSON-po-enoti/letu pristop, samo
-  prenesen na Relay. Ker skoraj vsaka operacija (namestitev pollira SVOJO
-  vrsto, Relay pošlje event SVOJI namestitvi) po naravi zadeva eno samo
-  namestitev, ne rabi pravega distribuiranega usmerjevalnika — lookup v
-  registry tabeli ("namestitev X → datoteka events_X.sqlite") zadostuje.
+- Read `docs/relay_api_contract.md` and `docs/data_model.md` first — they're the canonical reference, kept in sync with the CM repos that call this API.
+- `docs/cm_relay/` has the in-progress design notes for what's being built next (ICS fallback modes, the channel-presence confirmation gate, community/shared-services groundwork).
+- Issues and PRs are welcome — especially a second provider adapter, or sharper eyes on the webhook/idempotency path.
 
-**Razlog:** če Relay kdaj preraste en SQLite file (veliko namestitev, veliko
-dogodkov skozi čas), je edini del, ki bi to sploh občutil, events/commands, ne
-registry — in ta je že particioniran, torej "rast" pomeni samo dodajanje
-novih datotek, ne migracije obstoječe sheme. Če bi kdaj sam (majhen, skupen)
-registry postal ozko grlo, se zamenja samo ta en kos (npr. na Postgres), brez
-prepisovanja event/command logike.
+## Hard rules (don't break these)
 
-**Hosting:** obstoječa pro-dev domena (registrirana za 1 leto) je kandidat za
-Relay gostovanje, ko se dejansko postavi — po potrebi posvečena izključno
-Relayju in podaljšana za daljše obdobje. Odločitev ob dejanski postavitvi, ne
-blokira Fazo D dela.
+- Relay never becomes a second PMS or a permanent reservation store — CM stays the source of truth.
+- No global master secret; every CM installation has its own token (revocable/rotatable independently).
+- Provider credentials (Channex/Beds24/WuBook/...) live only here, never in the public CM Free source.
+- Webhook retries must never create a duplicate reservation on the CM side — idempotency keys are non-negotiable from day one.
+- Guest PII never belongs in Relay. That's CM Guestbook's job, kept deliberately separate.
+- AI Discovery (when built) is never a source of truth and never invents availability/prices/conditions — unknown stays `unknown`, never guessed.
+- Community membership is never conditioned on OTA API entitlement, or vice versa.
 
-## Struktura
+## Related projects
 
-```
-docs/
-  relay_api_contract.md       -- kanonična kopija (usklajena s CM repoji)
-  data_model.md                -- entitete: installations, events, mappings, community, ...
-src/
-  providers/CmConnectivityProviderAdapter.php   -- provider-neutral interface (OTA brief §8)
-  auth/         registry/      consent/
-  installations/ events/       commands/
-  mappings/     providers/     audit/
-  status/       community/     ai_discovery/
-```
+- [channel-manager](https://github.com/viljemd-hub/channel-manager) — CM Free, the self-hosted reservation manager this Relay exists to support.
 
-## Trdna pravila (ne kršiti, ko se Faza C začne)
+## License
 
-- Relay ne sme postati drugi PMS ali trajna rezervacijska baza.
-- Noben globalni master secret; vsaka CM namestitev ima svoj token (revoke/rotate).
-- Provider credentials (Channex/Beds24/WuBook/...) živijo samo tukaj, nikoli v javnem
-  CM Free source-u.
-- Webhook retry ne sme nikoli ustvariti duplicate reservation na CM strani —
-  idempotency po `idempotency_key` je obvezna od prvega dne.
-- Guestbook/PII podatki gostov v Relay NE sodijo.
-- AI Discovery ni source of truth in ne sme izmišljati availability/cen/pogojev —
-  neznan podatek je `unknown`, ne ugibanje.
-- Community članstvo ni pogojeno z OTA API entitlementom (in obratno).
+AGPLv3 — see `LICENSE`. Same license as CM Free: if you run a modified version of this as a network service, you share your changes too.
