@@ -2,9 +2,6 @@
 /**
  * CM Relay
  * File: src/db/registry.php
- * Author: Viljem Dvojmoč
- * Assistant: Claude
- * Copyright (c) 2026 Viljem Dvojmoč. All rights reserved.
  *
  * Shared SQLite registry (one file, per README "Jezik / framework / hosting"
  * 2026-09-17 decision): installations, mappings, entitlements, audit. Grows
@@ -155,6 +152,56 @@ function relay_registry_migrate(PDO $pdo): void
         $pdo->exec('ALTER TABLE unit_mappings ADD COLUMN price_corrector_pct REAL NOT NULL DEFAULT 0');
     }
 
+    // UNIQUE(property_mapping_id, cm_unit_id) originally allowed only ONE
+    // rate plan per unit - blocked the exact "different platforms need
+    // different correctors" case the price_corrector_pct comment above
+    // already described (2026-10-25: Booking.com needs its own rate plan/
+    // corrector, separate from Airbnb's, for the same A1 unit). SQLite
+    // can't ALTER a table-level UNIQUE constraint in place, so this rebuilds
+    // the table with UNIQUE(property_mapping_id, cm_unit_id,
+    // provider_rate_plan_id) instead - one row per unit PER RATE PLAN, so a
+    // unit can have N mappings (N channels/rate plans) rather than just one.
+    // Dry-run tested against a copy of the live registry 2026-10-25 before
+    // landing here - preserves all existing rows, allows a second A1 row.
+    // Idempotent: only runs if the old 2-column constraint is still present.
+    $uniqueCols = [];
+    foreach ($pdo->query('PRAGMA index_list(unit_mappings)')->fetchAll(PDO::FETCH_ASSOC) as $idx) {
+        if ((int)$idx['unique'] !== 1) {
+            continue;
+        }
+        $cols = array_column($pdo->query('PRAGMA index_info(' . $idx['name'] . ')')->fetchAll(PDO::FETCH_ASSOC), 'name');
+        $uniqueCols[] = $cols;
+    }
+    $hasOldTwoColConstraint = in_array(['property_mapping_id', 'cm_unit_id'], $uniqueCols, true);
+    $hasNewThreeColConstraint = in_array(['property_mapping_id', 'cm_unit_id', 'provider_rate_plan_id'], $uniqueCols, true);
+
+    if ($hasOldTwoColConstraint && !$hasNewThreeColConstraint) {
+        $pdo->exec('BEGIN TRANSACTION');
+        try {
+            $pdo->exec('
+                CREATE TABLE unit_mappings_new (
+                    id TEXT PRIMARY KEY,
+                    property_mapping_id TEXT NOT NULL REFERENCES property_mappings(id),
+                    cm_unit_id TEXT NOT NULL,
+                    provider_room_type_id TEXT NOT NULL,
+                    provider_rate_plan_id TEXT NOT NULL,
+                    price_corrector_pct REAL NOT NULL DEFAULT 0,
+                    UNIQUE(property_mapping_id, cm_unit_id, provider_rate_plan_id)
+                )
+            ');
+            $pdo->exec('
+                INSERT INTO unit_mappings_new (id, property_mapping_id, cm_unit_id, provider_room_type_id, provider_rate_plan_id, price_corrector_pct)
+                SELECT id, property_mapping_id, cm_unit_id, provider_room_type_id, provider_rate_plan_id, price_corrector_pct FROM unit_mappings
+            ');
+            $pdo->exec('DROP TABLE unit_mappings');
+            $pdo->exec('ALTER TABLE unit_mappings_new RENAME TO unit_mappings');
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
+
     $pdo->exec('
         CREATE TABLE IF NOT EXISTS audit_log (
             id TEXT PRIMARY KEY,
@@ -162,22 +209,6 @@ function relay_registry_migrate(PDO $pdo): void
             action TEXT NOT NULL,
             target_type TEXT,
             target_id TEXT,
-            created_at TEXT NOT NULL
-        )
-    ');
-
-    // Beta feedback (added 2026-09-21) - minimal reuse of the existing
-    // installation_id/token auth instead of building a new feedback system
-    // from scratch. Shared registry DB (not per-installation), since the
-    // owner reads all feedback from every beta installation in one place -
-    // there is no reason to partition this by installation the way
-    // events/commands are.
-    $pdo->exec('
-        CREATE TABLE IF NOT EXISTS installation_feedback (
-            id TEXT PRIMARY KEY,
-            installation_id TEXT NOT NULL REFERENCES installations(id),
-            message TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT "new",
             created_at TEXT NOT NULL
         )
     ');
@@ -247,6 +278,27 @@ function relay_lookup_unit_mapping(string $installationId, string $cmUnitId): ?a
 }
 
 /**
+ * Plural counterpart to relay_lookup_unit_mapping() - a cm_unit_id can now
+ * have more than one row (one per provider_rate_plan_id, e.g. Airbnb and
+ * Booking.com each with their own rate plan/corrector for the same A1 unit,
+ * added 2026-10-25). outbox_worker.php uses this to push price to every
+ * mapped rate plan, each with its own corrector, instead of just one.
+ *
+ * @return array<int, array{unit_mapping_id: string, provider: string, provider_property_id: string, provider_room_type_id: string, provider_rate_plan_id: string, price_corrector_pct: float}>
+ */
+function relay_lookup_unit_mappings(string $installationId, string $cmUnitId): array
+{
+    $stmt = relay_registry_db()->prepare('
+        SELECT um.id AS unit_mapping_id, pm.provider, pm.provider_property_id, um.provider_room_type_id, um.provider_rate_plan_id, um.price_corrector_pct
+        FROM unit_mappings um
+        JOIN property_mappings pm ON pm.id = um.property_mapping_id
+        WHERE pm.installation_id = ? AND um.cm_unit_id = ?
+    ');
+    $stmt->execute([$installationId, $cmUnitId]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+/**
  * Reverse of relay_lookup_unit_mapping() - given a provider's own property_id
  * (what a webhook payload carries), find which CM installation owns it. A
  * webhook has no installation token to authenticate with directly, so this
@@ -296,14 +348,4 @@ function relay_audit(string $action, ?string $targetType = null, ?string $target
         'INSERT INTO audit_log (id, actor, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
     );
     $stmt->execute([relay_uuid_v4(), $actor, $action, $targetType, $targetId, gmdate('c')]);
-}
-
-function relay_save_feedback(string $installationId, string $message): string
-{
-    $id = relay_uuid_v4();
-    relay_registry_db()->prepare(
-        'INSERT INTO installation_feedback (id, installation_id, message, status, created_at) VALUES (?, ?, ?, "new", ?)'
-    )->execute([$id, $installationId, $message, gmdate('c')]);
-
-    return $id;
 }

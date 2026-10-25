@@ -144,8 +144,14 @@ if ($propRow === false) {
         ->execute([$body['provider'], $body['provider_property_id'], $propId]);
 }
 
-$existingUnit = $db->prepare('SELECT id, price_corrector_pct FROM unit_mappings WHERE property_mapping_id = ? AND cm_unit_id = ?');
-$existingUnit->execute([$propId, $body['cm_unit_id']]);
+// Matches on the full (property_mapping_id, cm_unit_id, provider_rate_plan_id)
+// tuple, not just (property_mapping_id, cm_unit_id) - a unit can now have
+// more than one mapping (one per rate plan/channel, see registry.php's
+// 2026-10-25 UNIQUE constraint migration), so matching on unit alone would
+// overwrite an unrelated channel's row (e.g. posting Booking.com's mapping
+// would have silently clobbered Airbnb's).
+$existingUnit = $db->prepare('SELECT id, price_corrector_pct FROM unit_mappings WHERE property_mapping_id = ? AND cm_unit_id = ? AND provider_rate_plan_id = ?');
+$existingUnit->execute([$propId, $body['cm_unit_id'], $body['provider_rate_plan_id']]);
 $unitRow = $existingUnit->fetch(PDO::FETCH_ASSOC);
 
 // Only overwrite the corrector when the caller actually sent one - re-mapping

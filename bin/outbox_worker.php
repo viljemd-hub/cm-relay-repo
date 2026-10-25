@@ -77,8 +77,8 @@ foreach ($installations as $installation) {
             continue;
         }
 
-        $mapping = relay_lookup_unit_mapping($installation['id'], (string)$command['unit']);
-        if ($mapping === null) {
+        $mappings = relay_lookup_unit_mappings($installation['id'], (string)$command['unit']);
+        if (empty($mappings)) {
             $skippedNoMapping++;
             continue;
         }
@@ -90,32 +90,52 @@ foreach ($installations as $installation) {
             continue;
         }
 
-        // Per-mapping percentage corrector (added 2026-09-19) - CM's own
-        // price is never modified; the correction is applied only here, on
-        // the way out to this specific channel/rate plan, to account for
-        // that platform's own commission being higher/lower than another.
-        $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+        // A unit can have more than one mapping now (one per channel's own
+        // rate plan - e.g. Airbnb and Booking.com each need their own
+        // corrector for their own commission structure, see registry.php's
+        // 2026-10-25 migration). Push the same underlying CM prices to EVERY
+        // mapped rate plan, each with its own corrector applied on the way
+        // out - CM's own stored price is never modified.
+        $allOk = true;
+        $lastError = null;
+        $totalDates = 0;
+        foreach ($mappings as $mapping) {
+            if (!relay_rate_limit_ok('channex', 20)) {
+                $allOk = false;
+                $lastError = 'rate_limited_between_mappings';
+                break;
+            }
 
-        $entries = [];
-        foreach ($prices as $date => $price) {
-            $entries[] = [
-                'property_id' => $mapping['provider_property_id'],
-                'rate_plan_id' => $mapping['provider_rate_plan_id'],
-                'date' => $date,
-                'rate' => (int)round((float)$price * $correctorMultiplier * 100),
-            ];
+            $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+
+            $entries = [];
+            foreach ($prices as $date => $price) {
+                $entries[] = [
+                    'property_id' => $mapping['provider_property_id'],
+                    'rate_plan_id' => $mapping['provider_rate_plan_id'],
+                    'date' => $date,
+                    'rate' => (int)round((float)$price * $correctorMultiplier * 100),
+                ];
+            }
+
+            relay_rate_limit_record_call('channex');
+            $result = $adapter->pushBatch($entries);
+            $totalDates += count($entries);
+
+            if (!$result->ok) {
+                $allOk = false;
+                $lastError = $result->error;
+                break;
+            }
         }
 
-        relay_rate_limit_record_call('channex');
-        $result = $adapter->pushBatch($entries);
-
-        if ($result->ok) {
+        if ($allOk) {
             markSent($queue, [$command['id']]);
             $pushed++;
-            echo "OK  installation={$installation['installation_uuid']} unit={$command['unit']} reason=price dates=" . count($entries) . "\n";
+            echo "OK  installation={$installation['installation_uuid']} unit={$command['unit']} reason=price mappings=" . count($mappings) . " dates=$totalDates\n";
         } else {
-            markFailed($queue, [$command['id']], (string)$result->error);
-            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=price error={$result->error}\n";
+            markFailed($queue, [$command['id']], (string)$lastError);
+            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=price error=$lastError\n";
         }
     }
 
@@ -145,8 +165,8 @@ foreach ($installations as $installation) {
             continue;
         }
 
-        $mapping = relay_lookup_unit_mapping($installation['id'], (string)$unit);
-        if ($mapping === null) {
+        $mappings = relay_lookup_unit_mappings($installation['id'], (string)$unit);
+        if (empty($mappings)) {
             $skippedNoMapping += count($commands);
             continue;
         }
@@ -157,10 +177,18 @@ foreach ($installations as $installation) {
         $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
         $includeSoftBlocks = !array_key_exists('include_blocked_days', $payload) || (bool)$payload['include_blocked_days'];
 
+        // Availability is keyed by room_type_id, which every mapping for
+        // this unit shares (same physical room) - push it once, from the
+        // first mapping, not once per rate plan. Restrictions (min/max
+        // nights) are keyed by rate_plan_id though, and each channel's rate
+        // plan needs its own push, even though the values themselves are
+        // the same property-wide policy (price is the only thing that
+        // actually differs per channel, via price_corrector_pct).
+        $first = $mappings[0];
         $built = relay_build_availability_entries(
-            $mapping['provider_property_id'],
-            $mapping['provider_room_type_id'],
-            $mapping['provider_rate_plan_id'],
+            $first['provider_property_id'],
+            $first['provider_room_type_id'],
+            $first['provider_rate_plan_id'],
             $segments,
             $minNights,
             $maxNights,
@@ -171,20 +199,51 @@ foreach ($installations as $installation) {
         relay_rate_limit_record_call('channex');
         $availResult = $adapter->pushAvailabilityBatch($built['availability']);
 
-        $restrResult = null;
-        if ($availResult->ok && relay_rate_limit_ok('channex', 20)) {
-            relay_rate_limit_record_call('channex');
-            $restrResult = $adapter->pushBatch($built['restrictions']);
+        $allOk = $availResult->ok;
+        $lastError = $availResult->ok ? null : $availResult->error;
+
+        if ($availResult->ok) {
+            foreach ($mappings as $i => $mapping) {
+                if (!relay_rate_limit_ok('channex', 20)) {
+                    $allOk = false;
+                    $lastError = 'rate_limited_between_calls';
+                    break;
+                }
+
+                // First mapping's restrictions were already built above
+                // (same call that built availability); the rest need their
+                // own restriction entries for their own rate_plan_id.
+                $restrictions = $i === 0
+                    ? $built['restrictions']
+                    : relay_build_availability_entries(
+                        $mapping['provider_property_id'],
+                        $mapping['provider_room_type_id'],
+                        $mapping['provider_rate_plan_id'],
+                        $segments,
+                        $minNights,
+                        $maxNights,
+                        500,
+                        $includeSoftBlocks
+                    )['restrictions'];
+
+                relay_rate_limit_record_call('channex');
+                $restrResult = $adapter->pushBatch($restrictions);
+
+                if (!$restrResult->ok) {
+                    $allOk = false;
+                    $lastError = $restrResult->error;
+                    break;
+                }
+            }
         }
 
-        if ($availResult->ok && $restrResult !== null && $restrResult->ok) {
+        if ($allOk) {
             markSent($queue, $allIds);
             $pushed++;
-            echo "OK  installation={$installation['installation_uuid']} unit=$unit reason=availability window=" . count($built['availability']) . " collapsed=" . count($allIds) . "\n";
+            echo "OK  installation={$installation['installation_uuid']} unit=$unit reason=availability window=" . count($built['availability']) . " mappings=" . count($mappings) . " collapsed=" . count($allIds) . "\n";
         } else {
-            $error = !$availResult->ok ? $availResult->error : ($restrResult->error ?? 'rate_limited_between_calls');
-            markFailed($queue, $allIds, (string)$error);
-            echo "FAIL installation={$installation['installation_uuid']} unit=$unit reason=availability error=$error\n";
+            markFailed($queue, $allIds, (string)$lastError);
+            echo "FAIL installation={$installation['installation_uuid']} unit=$unit reason=availability error=$lastError\n";
         }
     }
 
@@ -203,8 +262,8 @@ foreach ($installations as $installation) {
             continue;
         }
 
-        $mapping = relay_lookup_unit_mapping($installation['id'], (string)$command['unit']);
-        if ($mapping === null) {
+        $mappings = relay_lookup_unit_mappings($installation['id'], (string)$command['unit']);
+        if (empty($mappings)) {
             $skippedNoMapping++;
             continue;
         }
@@ -214,13 +273,18 @@ foreach ($installations as $installation) {
         $segments = is_array($payload['occupancy_merged'] ?? null) ? $payload['occupancy_merged'] : [];
         $minNights = (int)($payload['min_nights'] ?? 1);
         $maxNights = isset($payload['max_nights']) ? (int)$payload['max_nights'] : null;
-        $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
         $includeSoftBlocks = !array_key_exists('include_blocked_days', $payload) || (bool)$payload['include_blocked_days'];
 
+        // Availability (room_type_id-keyed) is shared across every mapping
+        // for this unit - built/pushed once, from the first mapping. Each
+        // mapping still gets its own combined rate+restrictions push below,
+        // since §1 wants rate_plan_id-scoped rate+restrictions together and
+        // each channel's rate plan needs its own corrector-adjusted price.
+        $first = $mappings[0];
         $built = relay_build_availability_entries(
-            $mapping['provider_property_id'],
-            $mapping['provider_room_type_id'],
-            $mapping['provider_rate_plan_id'],
+            $first['provider_property_id'],
+            $first['provider_room_type_id'],
+            $first['provider_rate_plan_id'],
             $segments,
             $minNights,
             $maxNights,
@@ -229,41 +293,72 @@ foreach ($installations as $installation) {
             $includeSoftBlocks
         );
 
-        // Merge the real CM price into each restriction entry - §1 wants
-        // rate + restrictions together in one call, not split in two.
-        foreach ($built['restrictions'] as &$entry) {
-            if (isset($prices[$entry['date']])) {
-                $entry['rate'] = (int)round((float)$prices[$entry['date']] * $correctorMultiplier * 100);
-            }
-        }
-        unset($entry);
-        // Only push dates CM actually has a price for - a restriction entry
-        // with no real rate isn't what §1 is asking for.
-        $restrictionEntries = array_values(array_filter($built['restrictions'], static fn($e) => isset($e['rate'])));
-
-        if (empty($restrictionEntries)) {
-            markFailed($queue, [$command['id']], 'no_price_data_in_window');
-            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync error=no_price_data_in_window\n";
-            continue;
-        }
-
         relay_rate_limit_record_call('channex');
         $availResult = $adapter->pushAvailabilityBatch($built['availability']);
 
-        $restrResult = null;
-        if ($availResult->ok && relay_rate_limit_ok('channex', 20)) {
-            relay_rate_limit_record_call('channex');
-            $restrResult = $adapter->pushBatch($restrictionEntries);
+        $allOk = $availResult->ok;
+        $lastError = $availResult->ok ? null : $availResult->error;
+
+        if ($availResult->ok) {
+            foreach ($mappings as $i => $mapping) {
+                $restrictions = $i === 0
+                    ? $built['restrictions']
+                    : relay_build_availability_entries(
+                        $mapping['provider_property_id'],
+                        $mapping['provider_room_type_id'],
+                        $mapping['provider_rate_plan_id'],
+                        $segments,
+                        $minNights,
+                        $maxNights,
+                        500,
+                        $includeSoftBlocks
+                    )['restrictions'];
+
+                $correctorMultiplier = 1.0 + ((float)($mapping['price_corrector_pct'] ?? 0) / 100.0);
+
+                // Merge the real CM price into each restriction entry - §1
+                // wants rate + restrictions together in one call, not split
+                // in two. Each mapping applies its OWN corrector here.
+                foreach ($restrictions as &$entry) {
+                    if (isset($prices[$entry['date']])) {
+                        $entry['rate'] = (int)round((float)$prices[$entry['date']] * $correctorMultiplier * 100);
+                    }
+                }
+                unset($entry);
+                // Only push dates CM actually has a price for - a restriction
+                // entry with no real rate isn't what §1 is asking for.
+                $restrictionEntries = array_values(array_filter($restrictions, static fn($e) => isset($e['rate'])));
+
+                if (empty($restrictionEntries)) {
+                    $allOk = false;
+                    $lastError = 'no_price_data_in_window';
+                    break;
+                }
+
+                if (!relay_rate_limit_ok('channex', 20)) {
+                    $allOk = false;
+                    $lastError = 'rate_limited_between_calls';
+                    break;
+                }
+
+                relay_rate_limit_record_call('channex');
+                $restrResult = $adapter->pushBatch($restrictionEntries);
+
+                if (!$restrResult->ok) {
+                    $allOk = false;
+                    $lastError = $restrResult->error;
+                    break;
+                }
+            }
         }
 
-        if ($availResult->ok && $restrResult !== null && $restrResult->ok) {
+        if ($allOk) {
             markSent($queue, [$command['id']]);
             $pushed++;
-            echo "OK  installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync availability_days=" . count($built['availability']) . " rate_days=" . count($restrictionEntries) . " (2 API calls)\n";
+            echo "OK  installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync availability_days=" . count($built['availability']) . " mappings=" . count($mappings) . "\n";
         } else {
-            $error = !$availResult->ok ? $availResult->error : ($restrResult->error ?? 'rate_limited_between_calls');
-            markFailed($queue, [$command['id']], (string)$error);
-            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync error=$error\n";
+            markFailed($queue, [$command['id']], (string)$lastError);
+            echo "FAIL installation={$installation['installation_uuid']} unit={$command['unit']} reason=full_sync error=$lastError\n";
         }
     }
 }
