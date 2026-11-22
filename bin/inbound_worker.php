@@ -34,9 +34,9 @@ require_once __DIR__ . '/../src/db/registry.php';
 require_once __DIR__ . '/../src/db/installation_queue.php';
 require_once __DIR__ . '/../src/providers/ChannexAdapter.php';
 
-$apiKey = (json_decode(file_get_contents(relay_secrets_root() . '/channex_sandbox.json'), true))['api_key'] ?? null;
+$apiKey = (json_decode(file_get_contents(relay_secrets_root() . '/channex_production.json'), true))['api_key'] ?? null;
 if (!$apiKey) {
-    fwrite(STDERR, "No Channex API key in " . relay_secrets_root() . "/channex_sandbox.json\n");
+    fwrite(STDERR, "No Channex API key in " . relay_secrets_root() . "/channex_production.json\n");
     exit(1);
 }
 $adapter = new ChannexAdapter($apiKey);

@@ -59,7 +59,8 @@ Secrets (`secrets/`) and runtime data (`data/`) are gitignored and were never pa
 
 This is still a young, fast-moving project — the Relay exists to make a specific thing (small self-hosted CM installations reaching real OTA distribution) work, not to be a general-purpose integration platform. That said:
 
-- Read `docs/relay_api_contract.md` and `docs/data_model.md` first — they're the canonical reference, kept in sync with the CM repos that call this API.
+- **Read [`docs/cm_relay_whitepaper.md`](docs/cm_relay_whitepaper.md) first** — the current reference for anyone integrating against the live API, including non-CM-software participants (your own in-house system connecting through Relay's shared Channex access).
+- `docs/relay_api_contract.md` and `docs/data_model.md` are older conceptual notes, kept for history — the whitepaper above reflects what's actually deployed today.
 - `docs/cm_relay/` has the in-progress design notes for what's being built next (ICS fallback modes, the channel-presence confirmation gate, community/shared-services groundwork).
 - Issues and PRs are welcome — especially a second provider adapter, or sharper eyes on the webhook/idempotency path.
 

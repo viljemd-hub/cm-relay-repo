@@ -34,6 +34,21 @@
  *    flake for a while: the correct endpoint is /api/v1/availability, keyed by
  *    room_type_id. Use pushAvailability()/pushAvailabilityBatch() below, never
  *    the `availability` key inside pushRestrictions()/pushBatch().
+ *
+ * Google Vacation Rentals eligibility (confirmed 2026-11-20 via Channex docs
+ * + Google's own Hotel Center help page, NOT yet implemented here): activating
+ * the Google channel needs >=8 property photos (addPhoto() below already
+ * handles this part, proven live) PLUS phone, website URL, latitude/
+ * longitude, timezone, a hotel policy, a cancellation policy, and >=1
+ * facility on the property. public/signup.php collects these fields
+ * (property.google.*) but they are deliberately NOT wired into any create
+ * call here - the real Channex API shape for creating a hotel_policy/
+ * cancellation_policy/facility object was never verified against the live
+ * API (only the requirement's existence was confirmed via docs/search).
+ * Before writing createHotelPolicy()/createCancellationPolicy()/
+ * createFacility() methods, verify the actual request/response shape
+ * empirically against the real production key first, same as every other
+ * quirk documented in this block - don't assume a shape from docs alone.
  */
 
 declare(strict_types=1);
@@ -41,6 +56,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/CmConnectivityProviderAdapter.php';
 require_once __DIR__ . '/ProviderResult.php';
 require_once __DIR__ . '/ProviderStatus.php';
+require_once __DIR__ . '/../db/registry.php';
 
 final class ChannexAdapter implements CmConnectivityProviderAdapter
 {
@@ -50,18 +66,303 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
     {
     }
 
+    /**
+     * Back-compat: attaches an already-existing Channex property if
+     * provider_property_id is given, otherwise creates a new one. New
+     * callers provisioning a fresh property should call createProperty()
+     * directly - this wrapper exists only because the original stub shape
+     * (attach-only) may still have callers expecting it.
+     */
     public function createOrAttachProperty(array $property): ProviderResult
     {
-        if (empty($property['provider_property_id'])) {
-            return new ProviderResult(false, 'provider_property_id required - Channex property creation via API not yet built, attach an existing property id for now');
+        if (!empty($property['provider_property_id'])) {
+            $result = $this->request('GET', '/properties/' . urlencode($property['provider_property_id']));
+            if (!$result->ok) {
+                return $result;
+            }
+
+            return new ProviderResult(true, null, ['property_id' => $result->data['data']['id'] ?? null]);
         }
 
-        $result = $this->request('GET', '/properties/' . urlencode($property['provider_property_id']));
+        return $this->createProperty($property);
+    }
+
+    /**
+     * Creates a brand-new Channex property. $property: title, currency,
+     * country, city, property_type (defaults to 'apartment', matching the
+     * shape already proven live in bin/create_production_property.php).
+     * Replaces that one-off script's hardcoded logic as a reusable method -
+     * see provisionProperty() for the full property+units orchestration.
+     */
+    public function createProperty(array $property): ProviderResult
+    {
+        foreach (['title', 'currency', 'country', 'city'] as $required) {
+            if (empty($property[$required])) {
+                return new ProviderResult(false, "$required required");
+            }
+        }
+
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $result = $this->request('POST', '/properties', ['property' => [
+            'title' => $property['title'],
+            'currency' => $property['currency'],
+            'country' => $property['country'],
+            'city' => $property['city'],
+            'property_type' => $property['property_type'] ?? 'apartment',
+        ]]);
+        relay_rate_limit_record_call('channex');
+
         if (!$result->ok) {
             return $result;
         }
 
         return new ProviderResult(true, null, ['property_id' => $result->data['data']['id'] ?? null]);
+    }
+
+    /**
+     * Creates one room_type + its primary rate_plan on an existing property.
+     * $unit: title, count_of_rooms (default 1), occ_adults (default 2),
+     * occ_children (default 0), occ_infants (default 0), rate_plan_title
+     * (default 'Standard rate'), currency (required - should match the
+     * property's own currency), rate (required, MAJOR units e.g. 80.00 for
+     * 80 EUR - converted to Channex's minor-unit/cents convention here,
+     * same *100 convention already used in outbox_worker.php's price push).
+     */
+    public function createRoomTypeWithRatePlan(string $propertyId, array $unit): ProviderResult
+    {
+        foreach (['title', 'currency', 'rate'] as $required) {
+            if (empty($unit[$required]) && $unit[$required] !== 0) {
+                return new ProviderResult(false, "$required required");
+            }
+        }
+
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $roomType = $this->request('POST', '/room_types', ['room_type' => [
+            'property_id' => $propertyId,
+            'title' => $unit['title'],
+            'count_of_rooms' => (int)($unit['count_of_rooms'] ?? 1),
+            'occ_adults' => (int)($unit['occ_adults'] ?? 2),
+            'occ_children' => (int)($unit['occ_children'] ?? 0),
+            'occ_infants' => (int)($unit['occ_infants'] ?? 0),
+        ]]);
+        relay_rate_limit_record_call('channex');
+
+        if (!$roomType->ok) {
+            return $roomType;
+        }
+        $roomTypeId = $roomType->data['data']['id'] ?? null;
+
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached after room_type create', [
+                'room_type_id' => $roomTypeId,
+            ]);
+        }
+        $ratePlan = $this->request('POST', '/rate_plans', ['rate_plan' => [
+            'property_id' => $propertyId,
+            'room_type_id' => $roomTypeId,
+            'title' => $unit['rate_plan_title'] ?? 'Standard rate',
+            'currency' => $unit['currency'],
+            'options' => [[
+                'occupancy' => (int)($unit['occ_adults'] ?? 2),
+                'is_primary' => true,
+                'rate' => (int)round((float)$unit['rate'] * 100),
+            ]],
+        ]]);
+        relay_rate_limit_record_call('channex');
+
+        if (!$ratePlan->ok) {
+            return new ProviderResult(false, $ratePlan->error, ['room_type_id' => $roomTypeId]);
+        }
+
+        return new ProviderResult(true, null, [
+            'cm_unit_id' => $unit['cm_unit_id'] ?? null,
+            'room_type_id' => $roomTypeId,
+            'rate_plan_id' => $ratePlan->data['data']['id'] ?? null,
+        ]);
+    }
+
+    /**
+     * Deletes one rate_plan on Channex. Returns ok even if Channex reports
+     * it already gone (404) - a deprovision that partially succeeded earlier
+     * (e.g. rate_plan deleted, room_type delete then failed/rate-limited)
+     * must be safely re-runnable without erroring on the already-done half.
+     */
+    public function deleteRatePlan(string $ratePlanId): ProviderResult
+    {
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $result = $this->request('DELETE', '/rate_plans/' . urlencode($ratePlanId));
+        relay_rate_limit_record_call('channex');
+
+        if (!$result->ok && (int)($result->data['http_code'] ?? 0) !== 404) {
+            return $result;
+        }
+
+        return new ProviderResult(true);
+    }
+
+    /**
+     * Deletes one room_type on Channex. Same 404-is-fine tolerance as
+     * deleteRatePlan() above. Must be called AFTER its rate_plan is deleted -
+     * Channex rejects deleting a room_type that still has rate plans attached.
+     */
+    public function deleteRoomType(string $roomTypeId): ProviderResult
+    {
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $result = $this->request('DELETE', '/room_types/' . urlencode($roomTypeId));
+        relay_rate_limit_record_call('channex');
+
+        if (!$result->ok && (int)($result->data['http_code'] ?? 0) !== 404) {
+            return $result;
+        }
+
+        return new ProviderResult(true);
+    }
+
+    /**
+     * Deletes a Channex property outright. Same 404-is-fine tolerance as
+     * deleteRatePlan()/deleteRoomType() - a retry after a partial earlier
+     * failure must not error on a property that's already gone. Property
+     * must have no remaining room_types (the caller, api/v1/properties/
+     * deprovision.php, only calls this once a unit removal brings a
+     * property down to zero units) - owner correction 2026-11-18: an empty
+     * property left behind is NOT harmless, it can still carry real
+     * financial liability on the Channex account even with zero units, so
+     * removal must cascade all the way, not stop at "empty but present."
+     */
+    public function deleteProperty(string $propertyId): ProviderResult
+    {
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $result = $this->request('DELETE', '/properties/' . urlencode($propertyId));
+        relay_rate_limit_record_call('channex');
+
+        if (!$result->ok && (int)($result->data['http_code'] ?? 0) !== 404) {
+            return $result;
+        }
+
+        return new ProviderResult(true);
+    }
+
+    /**
+     * Removes one unit's Channex footprint entirely - the "undo" counterpart
+     * to createRoomTypeWithRatePlan(). Deletes the rate_plan first, then the
+     * room_type (Channex rejects a room_type delete while a rate_plan still
+     * references it). Does NOT touch the property itself - whether the
+     * property should also be deleted (i.e. this was its last unit) is
+     * registry-level knowledge (how many unit_mappings remain) that this
+     * provider-only class has no access to; see deprovision.php for the
+     * cascade-to-deleteProperty() decision.
+     */
+    public function deprovisionUnit(string $roomTypeId, string $ratePlanId): ProviderResult
+    {
+        $rateResult = $this->deleteRatePlan($ratePlanId);
+        if (!$rateResult->ok) {
+            return $rateResult;
+        }
+
+        $roomResult = $this->deleteRoomType($roomTypeId);
+        if (!$roomResult->ok) {
+            return $roomResult;
+        }
+
+        return new ProviderResult(true);
+    }
+
+    /**
+     * Full onboarding orchestration: one new property + one room_type/rate_plan
+     * per unit. Channex has no multi-object transaction, so a failure partway
+     * through (e.g. unit 3 of 5) must not lose track of the units that DID
+     * get created - each success is audit-logged as it happens so a retry/
+     * cleanup pass has something to find, and the partial result (property_id
+     * plus whichever units succeeded) is still returned rather than discarded.
+     */
+    public function provisionProperty(array $property, array $units): ProviderResult
+    {
+        $propertyResult = $this->createProperty($property);
+        if (!$propertyResult->ok) {
+            return $propertyResult;
+        }
+        $propertyId = $propertyResult->data['property_id'];
+        relay_audit('channex.property.create', 'provider_property', $propertyId);
+
+        $createdUnits = [];
+        foreach ($units as $unit) {
+            $unitResult = $this->createRoomTypeWithRatePlan($propertyId, $unit);
+            if (!$unitResult->ok) {
+                return new ProviderResult(false, $unitResult->error, [
+                    'property_id' => $propertyId,
+                    'units' => $createdUnits,
+                    'failed_unit' => $unit['cm_unit_id'] ?? $unit['title'] ?? null,
+                ]);
+            }
+            relay_audit('channex.unit.create', 'provider_room_type', $unitResult->data['room_type_id']);
+            $createdUnits[] = $unitResult->data;
+        }
+
+        return new ProviderResult(true, null, ['property_id' => $propertyId, 'units' => $createdUnits]);
+    }
+
+    /**
+     * REAL FINDING 2026-11-18, live production test: a freshly created
+     * property already comes back with is_active:true by default - the
+     * opposite of what was first assumed. A follow-up PUT /properties/{id}
+     * with {property:{is_active:false}} returns HTTP 200 and echoes the
+     * full property object back, but is_active stays true on the next GET -
+     * silently ignored, same class of quirk as availability clamping/
+     * min_stay field-name rejection elsewhere in this file. is_active is not
+     * a usable lever via this API. REMOVED (activateProperty/
+     * deactivateProperty, api/v1/properties/activate.php,
+     * api/v1/signup/activate.php, the admin UI "Activate on Channex" button)
+     * rather than shipped as dead code.
+     *
+     * The real "mount vs activate" two-stage flow the property owner
+     * remembers from using Channex's own dashboard is almost certainly
+     * about connecting an actual OTA CHANNEL (Booking.com/Airbnb) to a
+     * property, not this property-level flag - a freshly provisioned
+     * property has acc_channels_count:0 and is not bookable by any real
+     * guest regardless of is_active, until a channel is deliberately wired
+     * up. That channel-connection step is NOT automated anywhere in this
+     * codebase and should stay a manual, Channex-dashboard action - see the
+     * 2026-09-18 incident in cm_relay_ota_architecture memory, where
+     * activating Booking.com as a Connectivity Provider wiped the live
+     * property's existing calendar/pricing with no easy way back.
+     */
+
+    /**
+     * Attaches one photo by URL (Channex's Photos API takes a URL, not a
+     * file upload - same shape already proven live in
+     * bin/upload_a1_photos.php for the real A1 property, and re-confirmed
+     * live 2026-11-18: GET /photos?filter[property_id]=X is the real place
+     * to see what's attached - the property's own content.photos field
+     * stays empty even after a successful photo add, don't rely on it.
+     * Several OTA channels (Google Vacation Rental in particular, per that
+     * script's own comment) require a minimum photo count before a listing
+     * is eligible - this is surfaced as a UI hint, not enforced here.
+     */
+    public function addPhoto(string $propertyId, string $roomTypeId, string $url, int $position = 0, ?string $description = null): ProviderResult
+    {
+        if (!relay_rate_limit_ok('channex', 20)) {
+            return new ProviderResult(false, 'channex rate limit reached, try again shortly');
+        }
+        $result = $this->request('POST', '/photos', ['photo' => array_filter([
+            'property_id' => $propertyId,
+            'room_type_id' => $roomTypeId,
+            'url' => $url,
+            'position' => $position,
+            'description' => $description,
+        ], static fn($v) => $v !== null)]);
+        relay_rate_limit_record_call('channex');
+
+        return $result;
     }
 
     public function mapUnit(array $mapping): ProviderResult
@@ -296,7 +597,11 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
         $decoded = json_decode($raw, true);
         if ($httpCode >= 400) {
             $errorMsg = $decoded['errors']['title'] ?? $decoded['errors']['code'] ?? "HTTP $httpCode";
-            return new ProviderResult(false, is_array($errorMsg) ? json_encode($errorMsg) : $errorMsg, $decoded ?? []);
+            // http_code kept as its own data key (not string-matched out of
+            // $errorMsg) so callers like deleteRatePlan()/deleteRoomType() can
+            // reliably tell "already gone" (404) apart from a real failure,
+            // regardless of whatever wording Channex's own error title uses.
+            return new ProviderResult(false, is_array($errorMsg) ? json_encode($errorMsg) : $errorMsg, (is_array($decoded) ? $decoded : []) + ['http_code' => $httpCode]);
         }
 
         return new ProviderResult(true, null, $decoded ?? []);

@@ -226,6 +226,168 @@ function relay_registry_migrate(PDO $pdo): void
         )
     ');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_provider_call_log ON provider_call_log(provider, called_at)');
+
+    // 'kind' distinguishes installations that came from a real CM-software
+    // install (register.php, called by cm_connector_activate_with_relay())
+    // from ones created directly by a non-CM external signup (no
+    // installation_uuid from any CM install exists for those - see
+    // api/v1/signup/*.php). Same ALTER-if-missing idiom as price_corrector_pct
+    // above, since CREATE TABLE IF NOT EXISTS is a no-op on an existing file.
+    $installationCols = array_column($pdo->query('PRAGMA table_info(installations)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    if (!in_array('kind', $installationCols, true)) {
+        $pdo->exec("ALTER TABLE installations ADD COLUMN kind TEXT NOT NULL DEFAULT 'cm_software'");
+    }
+
+    // Legal/compliance record for the external (non-CM) signup's liability
+    // consent step - its own table rather than audit_log, since this needs
+    // to be queried back out directly (e.g. "who accepted liability text
+    // v1") and audit_log's generic actor/action/target shape isn't a good
+    // fit for that.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS external_consents (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL REFERENCES installations(id),
+            liability_accepted_at TEXT NOT NULL,
+            liability_text_version TEXT NOT NULL,
+            signer_name TEXT,
+            signer_email TEXT,
+            ip_address TEXT,
+            created_at TEXT NOT NULL
+        )
+    ');
+
+    // IP-based throttle for the public, unauthenticated signup/request.php
+    // endpoint - same called_at-trailing-window shape as provider_call_log
+    // above, keyed by IP instead of provider, since this gate is about
+    // abuse of a public form, not Channex's own API limit.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS signup_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_signup_attempts ON signup_attempts(ip_address, created_at)');
+
+    // Free-text manual business-agreement fields on service_entitlements -
+    // same fields/spirit as the CM-customer "business agreement" template in
+    // admin/cm_connector.php (plan/price/contract_ref/email/notes), so the
+    // external signup's agreement step writes to one conceptual place.
+    $entitlementCols = array_column($pdo->query('PRAGMA table_info(service_entitlements)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    foreach (['price_eur_month' => 'TEXT', 'contract_ref' => 'TEXT', 'relay_account_email' => 'TEXT', 'notes' => 'TEXT'] as $col => $type) {
+        if (!in_array($col, $entitlementCols, true)) {
+            $pdo->exec("ALTER TABLE service_entitlements ADD COLUMN $col $type");
+        }
+    }
+
+    // Owner correction 2026-11-18: the external signup flow is invitation-
+    // FIRST, not open-first. CM Relay's own operator issues an invite_code
+    // (via admin/review_queue.php) and sends it to a candidate by hand; only a
+    // valid, unconsumed invite_code lets public/signup.php's form render or
+    // submit at all - signup_attempts' IP throttle above stays as a cheap
+    // extra layer, but the real admission gate is this table, not that one.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS signup_invites (
+            id TEXT PRIMARY KEY,
+            invite_code TEXT UNIQUE NOT NULL,
+            candidate_name TEXT,
+            candidate_email TEXT,
+            status TEXT NOT NULL DEFAULT "issued",
+            installation_id TEXT REFERENCES installations(id),
+            created_at TEXT NOT NULL,
+            consumed_at TEXT
+        )
+    ');
+
+    // The SECOND tokenized link - issued only after the operator approves
+    // the submitted (pending) data in admin/review_queue.php. Deliberately a
+    // separate table/token from signup_invites above: the invite grants
+    // access to the FORM, this confirmation grants access to the actual
+    // issued bearer token/connection instructions, and the two must never
+    // be collapsed into one token or a leaked invite link would also leak
+    // live API access once approved.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS signup_confirmations (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL REFERENCES installations(id),
+            confirmation_token TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL,
+            viewed_at TEXT
+        )
+    ');
+
+    // Owner correction 2026-11-20: NO Channex-affecting action should ever
+    // be automatic, not even for an already-connected, already-authenticated
+    // CM-software installation - "Create on Channex" used to call Channex
+    // immediately (api/v1/properties/provision.php). Now it only creates a
+    // row here; a human operator reviews it in admin/review_queue.php
+    // before anything real happens. Deliberately NOT a reuse of
+    // signup_confirmations (that table's whole point is a one-time SECRET
+    // reveal to an unauthenticated party - an already-authenticated
+    // installation has no new secret that needs revealing) or
+    // external_consents (a liability signature for a legally distinct
+    // unknown party - a CM installation already consented locally via
+    // cm_connector_save_consent()). tracking_token is a pure audit handle
+    // (owner's own ask, "zaradi sledenja bolje, da je tudi ta prijava
+    // žetonirana") - returned in API responses, never gated behind a
+    // reveal page.
+    $pdo->exec('
+        CREATE TABLE IF NOT EXISTS channex_requests (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL REFERENCES installations(id),
+            cm_property_id TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT "provision",
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT "pending",
+            tracking_token TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            result_json TEXT
+        )
+    ');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_channex_requests_pending ON channex_requests(installation_id, cm_property_id, status)');
+}
+
+/**
+ * Where an external signup's raw submitted property+units+agreement payload
+ * is held between api/v1/signup/request.php (write) and
+ * api/v1/signup/approve.php (read) - a write-once-read-once blob, not worth
+ * a SQL table for. Lives under relay_data_root() alongside registry.sqlite,
+ * same private-root protection.
+ */
+function relay_pending_signup_path(string $installationId): string
+{
+    $dir = relay_data_root() . '/pending_signups';
+    if (!is_dir($dir)) {
+        mkdir($dir, 0770, true);
+    }
+    return $dir . '/' . $installationId . '.json';
+}
+
+/**
+ * True if $ipAddress has made fewer than $limit signup attempts in the
+ * trailing 24 hours. Also prunes rows older than 2 days so the table
+ * doesn't grow unbounded. Mirrors relay_rate_limit_ok()'s shape but keyed
+ * by IP over a day-long window instead of by provider over a minute.
+ */
+function relay_signup_attempt_ok(string $ipAddress, int $limit = 3): bool
+{
+    $db = relay_registry_db();
+    $db->prepare("DELETE FROM signup_attempts WHERE created_at < ?")
+        ->execute([gmdate('c', time() - 172800)]);
+
+    $stmt = $db->prepare("SELECT COUNT(*) FROM signup_attempts WHERE ip_address = ? AND created_at > ?");
+    $stmt->execute([$ipAddress, gmdate('c', time() - 86400)]);
+
+    return (int)$stmt->fetchColumn() < $limit;
+}
+
+function relay_signup_attempt_record(string $ipAddress): void
+{
+    relay_registry_db()
+        ->prepare('INSERT INTO signup_attempts (ip_address, created_at) VALUES (?, ?)')
+        ->execute([$ipAddress, gmdate('c')]);
 }
 
 /**

@@ -51,6 +51,7 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/_lib/auth.php';
+require_once __DIR__ . '/../../src/db/mapping_writer.php';
 
 $installation = relay_require_auth();
 
@@ -124,54 +125,12 @@ foreach (['cm_property_id', 'provider', 'provider_property_id', 'cm_unit_id', 'p
 
 $db = relay_registry_db();
 
-$existingProp = $db->prepare('SELECT id FROM property_mappings WHERE installation_id = ? AND cm_property_id = ?');
-$existingProp->execute([$installation['id'], $body['cm_property_id']]);
-$propRow = $existingProp->fetch(PDO::FETCH_ASSOC);
-
-if ($propRow === false) {
-    $propId = relay_uuid_v4();
-    $db->prepare('
-        INSERT INTO property_mappings (id, installation_id, cm_property_id, provider, provider_property_id)
-        VALUES (?, ?, ?, ?, ?)
-    ')->execute([$propId, $installation['id'], $body['cm_property_id'], $body['provider'], $body['provider_property_id']]);
-} else {
-    // Re-mapping to a different provider property (e.g. the old sandbox
-    // property was deleted and rebuilt) must actually update the stored
-    // provider_property_id - previously this silently kept the stale one,
-    // since only unit_mappings' room_type/rate_plan were ever updated here.
-    $propId = $propRow['id'];
-    $db->prepare('UPDATE property_mappings SET provider = ?, provider_property_id = ? WHERE id = ?')
-        ->execute([$body['provider'], $body['provider_property_id'], $propId]);
+try {
+    $written = relay_write_mapping($db, $installation['id'], $body);
+} catch (InvalidArgumentException $e) {
+    http_response_code(400);
+    echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    exit;
 }
 
-// Matches on the full (property_mapping_id, cm_unit_id, provider_rate_plan_id)
-// tuple, not just (property_mapping_id, cm_unit_id) - a unit can now have
-// more than one mapping (one per rate plan/channel, see registry.php's
-// 2026-10-25 UNIQUE constraint migration), so matching on unit alone would
-// overwrite an unrelated channel's row (e.g. posting Booking.com's mapping
-// would have silently clobbered Airbnb's).
-$existingUnit = $db->prepare('SELECT id, price_corrector_pct FROM unit_mappings WHERE property_mapping_id = ? AND cm_unit_id = ? AND provider_rate_plan_id = ?');
-$existingUnit->execute([$propId, $body['cm_unit_id'], $body['provider_rate_plan_id']]);
-$unitRow = $existingUnit->fetch(PDO::FETCH_ASSOC);
-
-// Only overwrite the corrector when the caller actually sent one - re-mapping
-// room_type/rate_plan IDs shouldn't silently reset an already-configured
-// correction back to 0.
-if ($unitRow === false) {
-    $priceCorrectorPct = isset($body['price_corrector_pct']) ? (float)$body['price_corrector_pct'] : 0.0;
-    $unitId = relay_uuid_v4();
-    $db->prepare('
-        INSERT INTO unit_mappings (id, property_mapping_id, cm_unit_id, provider_room_type_id, provider_rate_plan_id, price_corrector_pct)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ')->execute([$unitId, $propId, $body['cm_unit_id'], $body['provider_room_type_id'], $body['provider_rate_plan_id'], $priceCorrectorPct]);
-} else {
-    $unitId = $unitRow['id'];
-    $priceCorrectorPct = isset($body['price_corrector_pct']) ? (float)$body['price_corrector_pct'] : (float)$unitRow['price_corrector_pct'];
-    $db->prepare('
-        UPDATE unit_mappings SET provider_room_type_id = ?, provider_rate_plan_id = ?, price_corrector_pct = ? WHERE id = ?
-    ')->execute([$body['provider_room_type_id'], $body['provider_rate_plan_id'], $priceCorrectorPct, $unitId]);
-}
-
-relay_audit('mapping.create', 'unit_mapping', $unitId, $installation['id']);
-
-echo json_encode(['ok' => true, 'property_mapping_id' => $propId, 'unit_mapping_id' => $unitId]);
+echo json_encode(['ok' => true] + $written);
