@@ -85,7 +85,18 @@ foreach ($installations as $installation) {
 
         $payload = json_decode((string)$command['payload'], true) ?? [];
         $prices = is_array($payload['prices'] ?? null) ? $payload['prices'] : [];
-        if (empty($prices)) {
+        // 2026-11-23: Occupancy-Based Pricing (OBP) - an alternative to flat
+        // $prices, for a mapping whose Channex rate plan was created with
+        // sell_mode:"per_person" (see ChannexAdapter::createRoomTypeWithRatePlan
+        // $occupancyPrices param - immutable on Channex once created, see its
+        // own doc comment). Shape: {date: {occupancy: price}}, e.g.
+        // {"2026-12-01": {"1": 70.00, "2": 80.00}}. CM Relay has no opinion on
+        // which occupancy counts a given date needs - whatever the caller
+        // (the connected installation, CM-software or external like a
+        // non-CM in-house PMS) sends is pushed as-is, same "CM/caller stays
+        // the source of truth" principle as flat $prices.
+        $pricesByOccupancy = is_array($payload['prices_by_occupancy'] ?? null) ? $payload['prices_by_occupancy'] : [];
+        if (empty($prices) && empty($pricesByOccupancy)) {
             markSent($queue, [$command['id']]); // nothing to push, don't leave it pending forever
             continue;
         }
@@ -115,6 +126,29 @@ foreach ($installations as $installation) {
                     'rate_plan_id' => $mapping['provider_rate_plan_id'],
                     'date' => $date,
                     'rate' => (int)round((float)$price * $correctorMultiplier * 100),
+                ];
+            }
+            // OBP entries use Channex's documented "rates" field (an array
+            // of {occupancy, rate} objects) as the alternative to the flat
+            // "rate" field above - same /restrictions push, same corrector
+            // logic, just one entry per date carrying every occupancy tier
+            // for that date instead of a single number.
+            foreach ($pricesByOccupancy as $date => $byOcc) {
+                if (!is_array($byOcc) || empty($byOcc)) {
+                    continue;
+                }
+                $rates = [];
+                foreach ($byOcc as $occupancy => $price) {
+                    $rates[] = [
+                        'occupancy' => (int)$occupancy,
+                        'rate' => (int)round((float)$price * $correctorMultiplier * 100),
+                    ];
+                }
+                $entries[] = [
+                    'property_id' => $mapping['provider_property_id'],
+                    'rate_plan_id' => $mapping['provider_rate_plan_id'],
+                    'date' => $date,
+                    'rates' => $rates,
                 ];
             }
 

@@ -126,15 +126,31 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
      * $unit: title, count_of_rooms (default 1), occ_adults (default 2),
      * occ_children (default 0), occ_infants (default 0), rate_plan_title
      * (default 'Standard rate'), currency (required - should match the
-     * property's own currency), rate (required, MAJOR units e.g. 80.00 for
-     * 80 EUR - converted to Channex's minor-unit/cents convention here,
-     * same *100 convention already used in outbox_worker.php's price push).
+     * property's own currency), rate (required unless occupancy_prices is
+     * given, MAJOR units e.g. 80.00 for 80 EUR - converted to Channex's
+     * minor-unit/cents convention here, same *100 convention already used in
+     * outbox_worker.php's price push).
+     *
+     * occupancy_prices (optional, 2026-11-23, Occupancy-Based Pricing/OBP):
+     * {occupancy: rate} map, e.g. [1 => 70.00, 2 => 80.00] - when given,
+     * creates the rate plan with Channex's sell_mode:"per_person" and one
+     * "options" entry per occupancy tier, instead of the single-option
+     * sell_mode:"per_room" default below. Confirmed against Channex's own
+     * API docs and a live rate plan read on production (2026-11-22/23):
+     * sell_mode is set once at creation and is IMMUTABLE afterward (a later
+     * update attempt is refused with 422) - there is no "upgrade this rate
+     * plan to per_person later" path, a fresh rate plan must be created.
+     * The highest occupancy tier is marked is_primary (Channex requires
+     * exactly one primary option); matches occ_adults when present among
+     * the given tiers, otherwise falls back to the numerically highest one.
      */
     public function createRoomTypeWithRatePlan(string $propertyId, array $unit): ProviderResult
     {
-        foreach (['title', 'currency', 'rate'] as $required) {
-            if (empty($unit[$required]) && $unit[$required] !== 0) {
-                return new ProviderResult(false, "$required required");
+        $occupancyPrices = is_array($unit['occupancy_prices'] ?? null) ? $unit['occupancy_prices'] : [];
+        $required = $occupancyPrices ? ['title', 'currency'] : ['title', 'currency', 'rate'];
+        foreach ($required as $field) {
+            if (empty($unit[$field]) && $unit[$field] !== 0) {
+                return new ProviderResult(false, "$field required");
             }
         }
 
@@ -161,17 +177,36 @@ final class ChannexAdapter implements CmConnectivityProviderAdapter
                 'room_type_id' => $roomTypeId,
             ]);
         }
-        $ratePlan = $this->request('POST', '/rate_plans', ['rate_plan' => [
+
+        $ratePlanBody = [
             'property_id' => $propertyId,
             'room_type_id' => $roomTypeId,
             'title' => $unit['rate_plan_title'] ?? 'Standard rate',
             'currency' => $unit['currency'],
-            'options' => [[
+        ];
+        if ($occupancyPrices) {
+            $primaryOccupancy = (int)($unit['occ_adults'] ?? 0);
+            if (!array_key_exists($primaryOccupancy, $occupancyPrices)) {
+                $primaryOccupancy = max(array_map('intval', array_keys($occupancyPrices)));
+            }
+            $options = [];
+            foreach ($occupancyPrices as $occupancy => $rate) {
+                $options[] = [
+                    'occupancy' => (int)$occupancy,
+                    'is_primary' => ((int)$occupancy === $primaryOccupancy),
+                    'rate' => (int)round((float)$rate * 100),
+                ];
+            }
+            $ratePlanBody['sell_mode'] = 'per_person';
+            $ratePlanBody['options'] = $options;
+        } else {
+            $ratePlanBody['options'] = [[
                 'occupancy' => (int)($unit['occ_adults'] ?? 2),
                 'is_primary' => true,
                 'rate' => (int)round((float)$unit['rate'] * 100),
-            ]],
-        ]]);
+            ]];
+        }
+        $ratePlan = $this->request('POST', '/rate_plans', ['rate_plan' => $ratePlanBody]);
         relay_rate_limit_record_call('channex');
 
         if (!$ratePlan->ok) {
