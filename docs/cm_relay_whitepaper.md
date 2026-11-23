@@ -85,6 +85,22 @@ A background worker drains this queue and pushes to the channel provider, respec
 
 Availability is keyed by room type (shared across every rate plan on that room); price and restrictions are keyed per rate plan, so independently-priced plans genuinely differ.
 
+### Occupancy-based pricing (different price per guest count)
+
+For a rate plan that needs a different price for 1 guest vs. 2 guests on the same room and date, `reason: "price"` accepts `payload.prices_by_occupancy` as an alternative to the flat `payload.prices`:
+
+```json
+{
+  "prices_by_occupancy": {
+    "2026-12-24": { "1": 70.00, "2": 80.00 }
+  }
+}
+```
+
+Each occupancy tier gets the same per-mapping corrector applied as flat prices, and is pushed using the channel provider's native occupancy-pricing mechanism (confirmed, not assumed - verified directly against a real rate plan on production) rather than averaged into a single number.
+
+One real constraint worth knowing up front: an occupancy-priced rate plan has to be created that way from the start - the channel provider does not allow converting an existing flat-rate plan to occupancy pricing later. If this matters for a specific property, raise it before the initial mapping is created, not after.
+
 ## Getting reservations back - polling with acknowledgement, not raw webhook delivery
 
 ```
@@ -125,6 +141,6 @@ GET /api/v1/properties/request_status?cm_property_id=<id>
 
 - **A ready-made sandbox/test environment** - not something generally available today; worth a direct conversation for any specific onboarding.
 - **A standing, signed DPA template** - infrastructure runs on EU-hosted servers, but the actual data-processing agreement paperwork is handled per relationship, not auto-generated.
-- **Occupancy-tiered pricing** (different price for 1 vs. 2 guests on the same room/date) - the mapping model above cleanly handles rate-plan differentiation (refundable/non-refundable), but true per-occupancy pricing tiers depend on how the connecting system's own price export is structured; worth confirming directly for any specific case rather than assuming it's covered.
+- **Occupancy-based pricing has not yet carried real traffic** - the mechanism (see above) is built and verified against the channel provider's real API shape, but no property has actually pushed occupancy-tiered prices through it yet. First real use will be the first real test, not a formality.
 
 Everything else above is live, running code - happy to walk through any part of it in more depth or arrange a live look at how it actually behaves.
