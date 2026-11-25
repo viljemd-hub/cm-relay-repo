@@ -19,8 +19,9 @@ This isn't a skeleton — it's running production traffic:
 - **Per-channel price correction** — one CM price, independently adjusted per OTA (e.g. to absorb a platform's commission) without ever touching CM's own stored price.
 - **Channel-presence confirmation gate** — before a direct-booking confirmation code goes out to a guest, Relay independently verifies the block is actually visible on every connected channel first. Closes the exact race condition that makes direct bookings risky without a channel manager.
 - **Per-installation bearer tokens**, no global master secret. Every installation can be revoked or rotated independently.
+- **Every onboarding path is human-reviewed before it ever touches the OTA connectivity provider** — no action against the channel provider is automatic, whether the request comes from an already-connected CM installation or a brand-new participant. External (non-CM-software) participants go through an invitation-first signup; see [`docs/cm_relay_whitepaper.md`](docs/cm_relay_whitepaper.md) for the full flow.
 
-Provider support today: **Channex** (Vrbo live, Airbnb in progress, Booking.com paused pending their Extranet step — see `docs/cm_relay/`). The provider interface (`src/providers/CmConnectivityProviderAdapter.php`) is deliberately adapter-based, so a second provider (Beds24, WuBook, or a direct OTA integration) is an additional implementation, not a rewrite.
+Provider support today: **Channex**, with three channels live - **Airbnb**, **Booking.com**, and a direct/own-site channel (the price source Google Vacation Rentals itself reads from). The provider interface (`src/providers/CmConnectivityProviderAdapter.php`) is deliberately adapter-based, so a second provider (Beds24, WuBook, or a direct OTA integration) is an additional implementation, not a rewrite.
 
 ## Architecture
 
@@ -35,9 +36,9 @@ Provider support today: **Channex** (Vrbo live, Airbnb in progress, Booking.com 
         ▼                     ▼                      ▼
  OTA Connectivity        CM Community          Shared Services
         │                     │                      │
- Vrbo (live)             Public discovery       AI query layer
- Airbnb (in progress)    Availability share     Referrals
- Booking.com (paused)    Community search       Future services
+ Airbnb (live)            Public discovery       AI query layer
+ Booking.com (live)       Availability share     Referrals
+ Direct/own site (live)   Community search       Future services
 ```
 
 OTA Connectivity is live. CM Community and Shared Services are the roadmap this hub is deliberately built to support, not yet built out — see `docs/cm_relay/` for the design notes.
@@ -50,7 +51,7 @@ Two rules that hold regardless of what gets built on top:
 
 ## Data model
 
-- **Registry** (`installations`, `property_mappings`, `unit_mappings`, `audit_log`, `consent_records`) — one shared SQLite database. Grows slowly (one row per installation), never the bottleneck at the realistic scale this serves.
+- **Registry** (`installations`, `property_mappings`, `unit_mappings`, `channex_requests`, `external_consents`, `audit_log`) — one shared SQLite database. Grows slowly (one row per installation), never the bottleneck at the realistic scale this serves. `channex_requests` is the pending→reviewed→approved queue behind every onboarding/property-change action described above.
 - **Events/commands** — a separate SQLite file per installation, not one shared table. Matches CM's own existing per-unit/per-year JSON convention, just carried over to the Relay. See `docs/data_model.md`.
 
 Secrets (`secrets/`) and runtime data (`data/`) are gitignored and were never part of this repository's history — provider API keys, installation tokens and webhook secrets live only on the deployment, never in source.
