@@ -21,7 +21,7 @@ This isn't a skeleton — it's running production traffic:
 - **Per-installation bearer tokens**, no global master secret. Every installation can be revoked or rotated independently.
 - **Every onboarding path is human-reviewed before it ever touches the OTA connectivity provider** — no action against the channel provider is automatic, whether the request comes from an already-connected CM installation or a brand-new participant. External (non-CM-software) participants go through an invitation-first signup; see [`docs/cm_relay_whitepaper.md`](docs/cm_relay_whitepaper.md) for the full flow.
 
-Provider support today: **Channex**, with three channels live - **Airbnb**, **Booking.com**, and a direct/own-site channel (the price source Google Vacation Rentals itself reads from). The provider interface (`src/providers/CmConnectivityProviderAdapter.php`) is deliberately adapter-based, so a second provider (Beds24, WuBook, or a direct OTA integration) is an additional implementation, not a rewrite.
+Provider support today: **Channex**, with four channels live - **Airbnb**, **Booking.com**, a direct/own-site channel (the price source Google Vacation Rentals itself reads from), and **Vrbo** (tested specifically for running two connectivity systems in parallel against the same property - Vrbo's username-based API login makes that scenario straightforward, unlike channels that tie a single OAuth connection to one app). The provider interface (`src/providers/CmConnectivityProviderAdapter.php`) is deliberately adapter-based, so a second provider (Beds24, WuBook, or a direct OTA integration) is an additional implementation, not a rewrite.
 
 ## Architecture
 
@@ -39,6 +39,7 @@ Provider support today: **Channex**, with three channels live - **Airbnb**, **Bo
  Airbnb (live)            Public discovery       AI query layer
  Booking.com (live)       Availability share     Referrals
  Direct/own site (live)   Community search       Future services
+ Vrbo (live)
 ```
 
 OTA Connectivity is live. CM Community and Shared Services are the roadmap this hub is deliberately built to support, not yet built out — see `docs/cm_relay/` for the design notes.
